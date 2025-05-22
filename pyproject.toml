@@ -1,0 +1,23 @@
+[project]
+name = "oceansoda-ethzv2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "lukegre", email = "lukegre@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=6.29.5",
+    "scipy>=1.15.3",
+    "torch>=2.7.0",
+    "xarray>=2025.4.0",
+    "zarr<3",
+]
+
+[project.scripts]
+oceansoda-ethzv2 = "oceansoda_ethzv2:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
