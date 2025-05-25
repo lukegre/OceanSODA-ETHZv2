@@ -1,0 +1,50 @@
+ostia:
+- id: METOFFICE-GLO-SST-L4-REP-OBS-SST
+  product: ostia
+  time_start: '1982-01-01'
+  time_end: '2022-05-31'
+  flag: 1
+  vars:
+    latitude: lat
+    longitude: lon
+    analysed_sst: sst_ostia
+    analysis_error: sst_ostia_sigma_uncert
+    sea_ice_fraction: ice_ostia
+
+- id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+  product: ostia
+  time_start: '2022-06-01'
+  time_end: null
+  flag: 2
+  vars:
+    latitude: lat
+    longitude: lon
+    analysed_sst: sst_ostia
+    analysis_error: ssst_ostia_sigma_uncert
+    sea_ice_fraction: ice_ostia
+
+globcolour:
+- id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+  product: globcolour
+  time_start: '1998-01-01'
+  time_end: null
+  flag: 1
+  vars:
+    latitude: lat
+    longitude: lon
+    CHL: chl_globcolour
+    CHL_uncertainty: chl_globcolour_sigma_uncert
+    flags: chl_globcolour_fillflag
+
+duacs:
+- id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+  product: duacs
+  time_start: '1992-01-01'
+  time_end: null
+  flag: 1
+  vars:
+    latitude: lat
+    longitude: lon
+    adt: adt_duacs
+    sla: sla_duacs
+    err_sla: sla_duacs_sigma_uncert
