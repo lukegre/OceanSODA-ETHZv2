@@ -1,57 +1,132 @@
-import functools
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from loguru import logger
 
-from .utils.date_utils import DateWindows
-
-SODA_URL = "http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc"
-
-
-def validate_soda_data(ds, window_span="8D", spatial_res=0.25):
-    from .checker import TimestepChecker
-
-    checker = TimestepChecker(spatial_res=spatial_res, time_window=window_span)
-    checker.check_lon_lat(ds)
-    checker.check_land_points(ds)
-    checker.check_missing_lon(ds)
-
-    ds = checker.fix_timestep(ds)
-    ds = checker.add_time_bnds(ds)
-
-    return ds
+from .utils.core import CoreDataset
 
 
-def get_soda_data_for_window(
-    time: pd.Timestamp, window_span="8D", spatial_res=0.25
-) -> xr.Dataset:
-    from .processors import make_target_global_grid
-
-    ds = get_soda_for_extended_window(time=time, window_span="8D")
-
-    dw = DateWindows(window_span="8D")
-    t0, t1 = dw.get_window_edges(time)
-
-    target_grid = make_target_global_grid(spatial_res)
-
-    out = (
-        ds.resample(time="1D")
-        .interpolate(kind="linear")
-        .sel(time=slice(t0, t1))
-        .coarsen(time=8)
-        .mean()
-        .interp(**target_grid, method="linear")
-        .reindex(**target_grid, method="nearest", tolerance=0.5)
-        .roll(lon=360, roll_coords=False)
-        .interpolate_na(dim="lon", method="linear", limit=2)
-        .roll(lon=-360, roll_coords=False)
-        .pipe(validate_soda_data, window_span=window_span, spatial_res=spatial_res)
+class SODADataset(CoreDataset):
+    checks = (
+        "fix_timestep",
+        "add_time_bnds",
+        "check_lon_lat",
+        "check_land_points",
+        "check_missing_lon",
     )
 
-    return out
+    def __init__(
+        self,
+        spatial_res=0.25,
+        window_span="8D",
+        save_path: str = "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr",
+        url="http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc",
+        vars={},
+        fsspec_kwargs={},
+        **kwargs,
+    ):
+        """
+        Initialize the SODADataset with properties.
+        """
+
+        self.url_template = url
+        self.vars = vars
+        self.fsspec_kwargs = fsspec_kwargs
+        self.spatial_res = spatial_res  # Default spatial resolution in degrees
+        self.window_span = window_span  # Default window size for temporal resolution
+        self.save_path = save_path.format(
+            window_span=window_span,
+            spatial_res=f"{str(spatial_res).replace('.', '')}",
+        )
+
+    @lru_cache
+    def get_timestep_unprocessed(
+        self,
+        year: Optional[int] = None,
+        index: Optional[int] = None,
+        time: Optional[pd.Timestamp | str] = None,
+    ) -> xr.Dataset:
+        """
+        Get a time stride from the SODA dataset without regridding.
+
+        Parameters
+        ----------
+        year : int, optional
+            The year to get the data for.
+        index : int, optional
+            The index of the data to get.
+        time : pd.Timestamp or str, optional
+            The time to get the data for.
+        freq : str, optional
+            The frequency of the data to get.
+
+        Returns
+        -------
+        xr.Dataset
+            The dataset for the specified year and index.
+        """
+        from .utils.download import (
+            data_url_data_in_parallel,
+            get_urls_that_exist,
+            make_urls_from_dates,
+        )
+
+        time = self.date_windows.get_window_center(time=time, year=year, index=index)
+
+        dates = make_dates_for_extended_window(time=time, window_span=self.window_span)
+        urls = make_urls_from_dates(dates, url_template=self.url_template)
+        urls = get_urls_that_exist(urls)
+
+        logger.debug(
+            f"Found {len(urls)} valid URLs over a {len(dates)} day window to"
+            f" be clipped down to {self.window_span}"
+        )
+
+        ds_list = data_url_data_in_parallel(urls, self._netcdf_reader)
+        ds = xr.concat(ds_list, dim="time")
+        ds = ds.assign_attrs(requested_time=time)
+
+        return ds
+
+    @cached_property  # using cached_property to avoid recomputing the reader, thus nulling the cache
+    def _netcdf_reader(self):
+        from functools import partial
+
+        from .utils.download import netcdf_tempfile_reader
+
+        open_soda_custom = partial(open_soda_file, vars_rename=self.vars)
+        url_processor = partial(
+            netcdf_tempfile_reader, netcdf_opener=open_soda_custom, **self.fsspec_kwargs
+        )
+
+        return url_processor
+
+    def _regrid_data(self, ds) -> xr.Dataset:
+        from .utils.processors import make_target_global_grid
+
+        time = ds.attrs.pop("requested_time")
+        t0, t1 = self.date_windows.get_window_edges(time=time)
+
+        target_grid = make_target_global_grid(self.spatial_res)
+
+        out = (
+            ds.resample(time="1D")
+            .interpolate(kind="linear")
+            .sel(time=slice(t0, t1))
+            .coarsen(time=self.date_windows.ndays, boundary="exact")
+            .mean()
+            .interp(**target_grid, method="linear")
+            .reindex(**target_grid, method="nearest", tolerance=0.5)
+            # getting rid of lon interp gap - not pretty but works
+            .roll(lon=360, roll_coords=False)
+            .interpolate_na(dim="lon", method="linear", limit=2)
+            .roll(lon=-360, roll_coords=False)
+        )
+
+        return out
 
 
 def open_soda_file(
@@ -60,9 +135,9 @@ def open_soda_file(
         "xt_ocean": "lon",
         "yt_ocean": "lat",
         "st_ocean": "depth",
-        "salt": "sss",
-        "ssh": "ssh",
-        "mlp": "mld",
+        "salt": "sss_soda",
+        "ssh": "ssh_soda",
+        "mlp": "mld_soda",
     },
 ):
     """
@@ -78,33 +153,13 @@ def open_soda_file(
     The downside is that things need to be hardcoded unless we use
     a parital function.
     """
-    from functools import partial
+    from .utils.processors import preprocessor_generic
 
-    from .processors import preprocessor_generic
-
+    logger.trace("reading in SODA file: {}", fname)
     ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
     ds = preprocessor_generic(
         ds, vars_rename=vars_rename, depth_idx=0, coords_duplicate_check=["lat", "lon"]
     )
-
-    return ds
-
-
-def get_soda_for_extended_window(time: pd.Timestamp, window_span="8D"):
-    from .utils.download import (
-        get_data_from_urls,
-        get_urls_that_exist,
-        netcdf_url_reader,
-    )
-
-    url = SODA_URL.format(time=time)
-
-    dates = make_dates_for_extended_window(time=time, window_span="8D")
-    urls = make_urls_from_dates(dates, url_template=SODA_URL)
-    urls = get_urls_that_exist(urls)
-    url_processor = functools.partial(netcdf_url_reader, netcdf_opener=open_soda_file)
-    out = get_data_from_urls(urls, url_processor)
-    ds = xr.concat(out, dim="time")
 
     return ds
 
@@ -115,6 +170,8 @@ def make_dates_for_extended_window(
     index: Optional[int] = None,
     window_span="8D",
 ) -> pd.DatetimeIndex:
+    from .utils.date_utils import DateWindows
+
     dw = DateWindows(window_span=window_span)
     year, index = dw.get_index(time=time, year=year, index=index)  # type: ignore
 
@@ -139,8 +196,3 @@ def make_dates_for_extended_window(
     ).tolist()
 
     return pd.DatetimeIndex(window_plus_wings)
-
-
-def make_urls_from_dates(dates: pd.DatetimeIndex, url_template=SODA_URL):
-    url_list = [url_template.format(time=date) for date in dates]
-    return tuple(url_list)

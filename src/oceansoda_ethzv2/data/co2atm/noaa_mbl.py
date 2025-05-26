@@ -152,7 +152,7 @@ def regress_seasonal_resid(
     from sklearn.metrics import r2_score
 
     from ...model.metrics import r2_score
-    from ..utils.smoothing import smooth_seas_cycle
+    from .smoothing import smooth_seas_cycle
 
     # compute the seasonal cycle
     m = xs.linslope(x, y, dim=dim, skipna=True)

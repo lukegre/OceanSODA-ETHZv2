@@ -29,6 +29,9 @@ def standard_regridding(
     for var in ds.data_vars:
         ds[var] = ds[var].astype(dtype)
 
+    if "depth" in ds.dims:
+        ds = ds.sel(depth=0, method="nearest", drop=True)
+
     return ds
 
 
@@ -61,6 +64,17 @@ def preprocessor_generic(ds, vars_rename={}, depth_idx=None, coords_duplicate_ch
 
     ds = lon_180W_180E(ds)
 
+    for coord in ["lon", "lat"]:
+        ds = sort_coord(ds, coord)
+
+    return ds
+
+
+def sort_coord(ds, coord_name):
+    ser = ds[coord_name].to_series()
+    if not ser.is_monotonic_increasing:
+        ds = ds.sortby(coord_name)
+        ds = ds.assign_attrs({f"processing_{coord_name}_sorted": True})
     return ds
 
 
@@ -118,10 +132,14 @@ def get_timesteps_per_window(ds, window_size: str = "8D", time_dim="time"):
     if time_dim not in ds.dims:
         raise ValueError(f"Dataset does not contain dimension '{time_dim}'")
 
-    time_diff = ds[time_dim].diff(time_dim).median()
-    n_timesteps = int(window_td / time_diff)
-
-    return n_timesteps
+    if ds[time_dim].size == 1:
+        return 1
+    elif ds[time_dim].size == 0:
+        raise ValueError(f"Dataset dimension '{time_dim}' is empty")
+    else:
+        time_diff = ds[time_dim].diff(time_dim).median()
+        n_timesteps = int(window_td / time_diff)
+        return n_timesteps
 
 
 def coarsen_then_interp(ds, spatial_res=0.25, window_size: str = "8D"):
@@ -158,6 +176,7 @@ def coarsen_toward_target_grid(
 
     warnings.simplefilter("ignore")
 
+    # filter out variables that contain exclude keys
     std_vars = []
     for key in ds.data_vars:
         pattern = r"(" + r"|".join(exclude_keys) + r")"
@@ -166,6 +185,7 @@ def coarsen_toward_target_grid(
             continue
         std_vars.append(key)
 
+    # if the grid size of the input is smaller than the target, raise error to not coarsen
     if ds.lat.size < target_grid["lat"].size:
         raise ValueError(
             "Dataset latitude resolution is finer than target "
@@ -185,7 +205,7 @@ def coarsen_toward_target_grid(
     out = xr.merge([avg, std])
 
     out = out.assign_attrs(
-        coarsen_grid=str(dict(coarse_dict)),
+        processing_coarsen_grid=str(dict(coarse_dict)),
     )
 
     return out

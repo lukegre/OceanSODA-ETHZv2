@@ -41,11 +41,31 @@ class DateWindows:
         self.time_offset = time_offset
         self.today = pd.Timestamp.today()
 
+        self.ndays = pd.Timedelta(window_span).days
+        self.nhours = pd.Timedelta(window_span).seconds // 3600
+
     def get_bin_edges(self, year: Union[int, list[int]]) -> pd.DatetimeIndex:
         return get_date_bins(year, self.freq)[0]
 
     def get_bin_centers(self, year: Union[int, list[int]]) -> pd.DatetimeIndex:
         return get_date_bins(year, self.freq)[1]
+
+    def get_window_center(
+        self,
+        time: Optional[pd.Timestamp | str] = None,
+        year: Optional[int] = None,
+        index: Optional[int] = None,
+    ) -> pd.Timestamp:
+        self._check_optionals_groupings((time,), (year, index))
+        if time is not None:
+            year, index = self.get_index(time=time)
+        elif year is None or index is None:
+            raise ValueError("Either time or (year + index) must be specified")
+
+        bin_centers = self.get_bin_centers(year)
+        window_center = bin_centers[index]
+
+        return window_center
 
     def get_window_edges(
         self,

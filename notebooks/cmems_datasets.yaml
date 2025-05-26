@@ -1,50 +1,143 @@
-ostia:
-- id: METOFFICE-GLO-SST-L4-REP-OBS-SST
-  product: ostia
-  time_start: '1982-01-01'
-  time_end: '2022-05-31'
-  flag: 1
-  vars:
-    latitude: lat
-    longitude: lon
-    analysed_sst: sst_ostia
-    analysis_error: sst_ostia_sigma_uncert
-    sea_ice_fraction: ice_ostia
+ceda:
+  sstcci:
+    url: https://dap.ceda.ac.uk/neodc/eocis/data/global_and_regional/sea_surface_temperature/CDR_v3/Analysis/L4/v3.0.1/{time:%Y}/{time:%m}/{time:%d}/{time:%Y%m%d}120000-ESACCI-L4_GHRSST-SSTdepth-OSTIA-GLOB_{version}-v02.0-fv01.0.nc
+    time_start': '1982-01-01'
+    time_end: '2024-06-22'
+    version:
+      # here version is parsed specifically for CEDA datasets -
+      # it is a variable in the url that is date dependent and processed functionally
+      CDR3.0:
+        time_start': '1982-01-01'
+        time_end: '2021-12-31'
+      ICDR3.0:
+        time_start: '2022-01-01'
+        time_end: '2024-06-22'
+  ssscci:
+    url: ''
+    time_start: '2010-05-01' # check this time
+    time_end: '2022-12-31' # check this time
 
-- id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
-  product: ostia
-  time_start: '2022-06-01'
-  time_end: null
-  flag: 2
-  vars:
-    latitude: lat
-    longitude: lon
-    analysed_sst: sst_ostia
-    analysis_error: ssst_ostia_sigma_uncert
-    sea_ice_fraction: ice_ostia
+ftp:
+  occci:
+    url: ftp://oceancolour.org/occci-v6.0/geographic/netcdf/8day/chlor_a/{time:%Y}/ESACCI-OC-L3S-CHLOR_A-MERGED-8D_DAILY_4km_GEO_PML_OCx-{time:%Y%m%d}-fv6.0.nc
+    time_start: '1998-01-01'
+    time_end: '2024-11-19' # check this one
+    vars:
+      chlor_a: chl_occci
+      chlor_a_log10_rmsd: chl_occci_sigma_uncert
+    fsspec_kwargs:
+      ftp:
+        username: '{{ OCCCI_USERNAME }}' # will be replaced from env
+        password: '{{ OCCCI_PASSWORD }}'
 
-globcolour:
-- id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
-  product: globcolour
-  time_start: '1998-01-01'
-  time_end: null
-  flag: 1
-  vars:
-    latitude: lat
-    longitude: lon
-    CHL: chl_globcolour
-    CHL_uncertainty: chl_globcolour_sigma_uncert
-    flags: chl_globcolour_fillflag
+soda:
+  soda_3_15_2:
+    url: http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc
+    product: soda
+    time_start: '1982-01-01'
+    time_end: '2024-12-10'
+    vars:
+      xt_ocean: lon
+      yt_ocean: lat
+      st_ocean: depth
+      salt: sss_soda
+      ssh: ssh_soda
+      mlp: mld_soda
 
-duacs:
-- id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
-  product: duacs
-  time_start: '1992-01-01'
-  time_end: null
-  flag: 1
-  vars:
-    latitude: lat
-    longitude: lon
-    adt: adt_duacs
-    sla: sla_duacs
-    err_sla: sla_duacs_sigma_uncert
+era5:
+  gcs_zarr:
+  - url: gcs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3
+    time_start: '1982-01-01'
+    time_end: null
+    vars:
+      latitude: lat
+      longitude: lon
+      mean_sea_level_pressure: msl_era5
+      10m_u_component_of_wind: u10_era5
+      10m_v_component_of_wind: v10_era5
+
+cmems:
+  login:
+    username: '{{ COPERNICUSMARINE_SERVICE_USERNAME }}'
+    password: '{{ COPERNICUSMARINE_SERVICE_PASSWORD }}'
+  ostia:
+  - id: METOFFICE-GLO-SST-L4-REP-OBS-SST
+    product: ostia
+    time_start: '1982-01-01'
+    time_end: '2022-05-31'
+    flag: 1
+    vars:
+      latitude: lat
+      longitude: lon
+      analysed_sst: sst_ostia
+      analysis_error: sst_ostia_sigma_uncert
+      sea_ice_fraction: ice_ostia
+
+  - id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+    product: ostia
+    time_start: '2022-06-01'
+    time_end: null
+    flag: 2
+    vars:
+      latitude: lat
+      longitude: lon
+      analysed_sst: sst_ostia
+      analysis_error: sst_ostia_sigma_uncert
+      sea_ice_fraction: ice_ostia
+
+  globcolour:
+  - id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+    product: globcolour
+    time_start: '1998-01-01'
+    time_end: null
+    flag: 1
+    vars:
+      latitude: lat
+      longitude: lon
+      CHL: chl_globcolour
+      CHL_uncertainty: chl_globcolour_sigma_uncert
+      flags: chl_globcolour_fillflag
+
+  duacs:
+  - id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+    product: duacs
+    time_start: '1992-01-01'
+    time_end: '2024-11-19'
+    flag: 1
+    vars:
+      latitude: lat
+      longitude: lon
+      adt: adt_duacs
+      sla: sla_duacs
+      err_sla: sla_duacs_sigma_uncert
+  - id: cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0.125deg_P1D
+    product: duacs
+    time_start: '2024-11-20'
+    time_end: null
+    flag: 2
+    vars:
+      latitude: lat
+      longitude: lon
+      adt: adt_duacs
+      sla: sla_duacs
+      err_sla: sla_duacs_sigma_uncert
+
+  multiobs:
+  - id: cmems_obs-mob_glo_phy-sss_my_multi_P1D
+    product: multiobs
+    time_start: '1993-01-01'
+    time_end: '2023-12-16'
+    flag: 1
+    vars:
+      latitude: lat
+      longitude: lon
+      sos: sss_multiobs
+  - id: cmems_obs-mob_glo_phy-sss_nrt_multi_P1D
+    product: multiobs
+    time_start: '2023-12-17'
+    time_end: null
+    flag: 2
+    vars:
+      latitude: lat
+      longitude: lon
+      sos: sss_multiobs

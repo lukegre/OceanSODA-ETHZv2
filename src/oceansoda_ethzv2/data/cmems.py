@@ -11,8 +11,14 @@ import xarray as xr
 from loguru import logger
 from memoization import cached
 from pydantic import BaseModel, Field
+from tqdm.dask import TqdmCallback as ProgressBar
 
 from .utils.zarr_utils import ZarrDataset
+
+
+class LoginInfo(BaseModel):
+    username: str
+    password: str
 
 
 class CMEMSEntry(BaseModel):
@@ -34,22 +40,12 @@ class CMEMSEntry(BaseModel):
         {},
         description="Variables to rename in the dataset, e.g. {'analysed_sst': 'sst'}",
     )
+    # check that login dictionary has "username" and "password" keys that both have strings as values
+    login: LoginInfo | None = {}
 
 
 class CMEMSDataset(ZarrDataset):
-    def __init__(
-        self, entries: list[dict], spatial_res: float = 0.25, temporal_res: str = "8D"
-    ):
-        """
-        Initialize the CMEMSDataset with properties.
-        Properties should match the CMEMSEntry model.
-        """
-        for entry in entries:
-            is_valid_entry(entry, CMEMSEntry)
-
-        self.entries = entries
-        self.spatial_res = spatial_res  # Default spatial resolution in degrees
-        self.temporal_res = temporal_res  # Default window size for temporal resolution
+    checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
     def _open_full_dataset(self) -> xr.Dataset:
         """
@@ -58,13 +54,16 @@ class CMEMSDataset(ZarrDataset):
         return open_cmems_datasets(self.entries)
 
     def _regrid_data(self, ds) -> xr.Dataset:
-        from .processors import standard_regridding
+        from .utils.processors import standard_regridding
 
         return standard_regridding(
             ds_in=ds,
             spatial_res=self.spatial_res,
             window_size=self.temporal_res,
         )
+
+    def _validate_entry(self, entry: dict):
+        CMEMSEntry(**entry)
 
 
 class CMEMSCatalog:
@@ -80,11 +79,42 @@ class CMEMSCatalog:
         Initialize the CMEMSCatalog with a dictionary of datasets.
         The keys are dataset names and the values are CMEMSDataset instances.
         """
-        self.datasets = munch.Munch(datasets)
+        self.login = datasets.pop("login", {})
+        self.datasets = self._parse_cmems_datasets(datasets)
         self.spatial_res = spatial_res  # Default spatial resolution in degrees
         self.temporal_res = temporal_res  # Default window size for temporal resolution
         spatial_res = str(spatial_res).replace(".", "")  # type: ignore - convert to string without dot for filename
         self.save_path = save_path.format(**locals())
+
+        self.authenticate()
+
+    def authenticate(self):
+        """
+        Authenticate with CMEMS using the provided login credentials.
+        This method is called automatically during initialization if login credentials are provided.
+        """
+        import logging
+
+        from copernicusmarine import login
+
+        logging.getLogger("copernicusmarine").setLevel(logging.WARNING)
+        if self.login is not {}:
+            login(**self.login, force_overwrite=True, check_credentials_valid=True)
+            logger.info(
+                "Successfully authenticated with CMEMS using provided credentials, and persisted credentials."
+            )
+        else:
+            logger.warning(
+                "No login credentials provided for CMEMS authentication. Assuming credentials are already set up."
+            )
+
+    @staticmethod
+    def _parse_cmems_datasets(datasets: dict) -> dict:
+        if "login" in datasets:
+            raise KeyError(
+                "'login' should have been popped from the datasets dictionary"
+            )
+        return {key: CMEMSDataset(vals) for key, vals in datasets.items()}
 
     @classmethod
     def from_yaml(cls, yaml_file: str) -> "CMEMSCatalog":
@@ -100,27 +130,26 @@ class CMEMSCatalog:
         datasets = {name: CMEMSDataset(entries) for name, entries in data.items()}
         return cls(datasets)
 
-    def write_timestep_to_disk(self, year: int, index: int, progress=False) -> str:
+    def write_timestep_to_disk(
+        self, year: int, index: int, progress=False, validate_data=True
+    ) -> str:
         """
         Write the dataset for a specific year and index to disk.
         The dataset is saved in Zarr format at the specified save path.
         """
-        from .utils.zarr_utils import save_vars_to_zarrs
-
-        ds = self._get_timestep((year, index))
-        if ds is None:
-            raise ValueError(f"No data available for year {year} and index {index}.")
-
-        # Save the dataset to Zarr
-        save_vars_to_zarrs(
-            ds,
-            self.save_path,
-            group_by_year=True,
-            progress=progress,
-            error_handling="warn",
-        )
-
-        return self.save_path
+        ds = []
+        for name in self.datasets:
+            dataset = self.datasets[name]
+            ds += (
+                dataset.write_timestep_to_disk(
+                    year=year,
+                    index=index,
+                    progress=progress,
+                    validate_data=validate_data,
+                ),
+            )
+        ds = xr.merge(ds)
+        return ds
 
     def get(self, year: int, index: int, progress=False) -> xr.Dataset:
         """
@@ -178,9 +207,9 @@ class CMEMSCatalog:
 def open_cmems_dataset(entry: dict) -> xr.Dataset:
     from copernicusmarine import open_dataset
 
-    from .processors import rename_and_drop
+    from .utils.processors import rename_and_drop
 
-    is_valid_entry(entry, CMEMSEntry)
+    CMEMSEntry(**entry)  # Validate the entry against the CMEMSEntry model
 
     logger.debug(
         "Opening CMEMS dataset with properties: \n{}",
@@ -215,17 +244,3 @@ def make_flag_along_dim(
     """Create a flag variable along a specified dimension."""
     flag_values = [flag_value] * ds[flag_dim].size
     return xr.DataArray(flag_values, dims=[flag_dim])
-
-
-# check if entry is a valid CMEMSEntry
-def is_valid_entry(entry, model):
-    try:
-        model(**entry)
-    except Exception as e:
-        missing_entry = str(e).splitlines()[1]
-        expected = pprint.pformat(CMEMSEntry.model_fields, sort_dicts=False)
-        raise ValueError(
-            f"Invalid or missing entry: [{missing_entry}] \n\nPlease check the "
-            "CMEMS entry dictionary to make sure it matches the following model:\n"
-            f"{expected}"
-        )

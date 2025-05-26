@@ -1,66 +1,70 @@
 import functools
 import pathlib
-from abc import ABC
-from typing import Optional, Union
+import pprint
+from abc import ABC, abstractmethod
+from typing import Optional, Union, final
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 from loguru import logger
 
+from .core import CoreDataset
 
-class ZarrDataset(ABC):
-    __slots__ = ("entries", "spatial_res", "temporal_res")
 
-    def __init__(self, entries: list[dict], spatial_res: float, temporal_res: str):
-        """
-        Initialize the ZarrDataset with a list of entries.
-
-        Parameters
-        ----------
-        entries : list[dict]
-            A list of dictionaries containing dataset entries.
-        """
-        raise NotImplementedError(
-            "This class is an abstract base class and should not be instantiated directly."
-        )
-
-    def __getitem__(self, key: tuple[int, int]):
-        """
-        Allow access to dataset properties as attributes.
-        """
-        if isinstance(key, tuple) and len(key) == 2:
-            # If key is a tuple, return the dataset for the specified year and index
-            year, index = key
-            return self.get_time_stride(year=year, index=index)
-        else:
-            raise NotImplementedError(
-                "Only tuple keys of the form (year, index) are supported for CMEMSDataset."
+class ZarrDataset(CoreDataset, ABC):
+    @final
+    def __init__(
+        self,
+        entries: list[dict],
+        spatial_res: float = 0.25,
+        temporal_res: str = "8D",
+        save_path: str = "../data/{temporal_res}_{spatial_res}/{{var}}-{temporal_res}_{spatial_res}.zarr",
+    ):
+        if not isinstance(entries, list):
+            raise TypeError(
+                f"The input key with the following values is invalid {str(entries)}"
             )
 
-    def _open_full_dataset(self) -> xr.Dataset:
+        self.entries = self._process_entries(entries)
+
+        self.spatial_res = spatial_res  # Default spatial resolution in degrees
+        self.temporal_res = temporal_res  # Default window size for temporal resolution
+        self.save_path = save_path.format(
+            temporal_res=temporal_res,
+            spatial_res=f"{str(spatial_res).replace('.', '')}",
+        )
+
+    def _process_entries(self, entries: list[dict]) -> list[dict]:
         """
-        Open the full dataset from the Zarr store.
-
-        Returns
-        -------
-        xr.Dataset
-            The full dataset as an xarray Dataset.
+        Process the entries to ensure they are in the correct format.
+        This method can be overridden if additional processing is needed.
         """
-        raise NotImplementedError("This method should be implemented in subclasses.")
+        for entry in entries:
+            self._validate_entry(entry)
+        return entries
 
-    def _regrid_data(self, ds) -> xr.Dataset:
-        raise NotImplementedError("This method should be implemented in subclasses.")
+    @abstractmethod
+    def _validate_entry(self, entry: dict): ...
 
+    @abstractmethod
+    def _open_full_dataset(self) -> xr.Dataset: ...
+
+    @abstractmethod
+    def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset: ...
+
+    @final
     @functools.cached_property
-    def data(self) -> xr.Dataset:
+    def full_dataset(self) -> xr.Dataset:
         """
         Get the CMEMS dataset as an xarray Dataset.
         This method is a wrapper around the open method.
         """
         return self._open_full_dataset()
 
-    def get_time_stride(
+    @final
+    @functools.lru_cache
+    def get_timestep_unprocessed(
         self,
         year: Optional[int] = None,
         index: Optional[int] = None,
@@ -77,41 +81,7 @@ class ZarrDataset(ABC):
             "Time range must be at most one frequency apart."
         )
 
-        ds = self.data.sel(time=slice(t0, t1))
-        return ds
-
-    def get_time_stride_regridded(
-        self,
-        year: Optional[int] = None,
-        index: Optional[int] = None,
-        time: Optional[pd.Timestamp | str] = None,
-        freq="8D",
-    ) -> xr.Dataset:
-        """
-        Get a time stride from the dataset and regrid it to the target grid.
-
-        Parameters
-        ----------
-        year : int, optional
-            The year to get the data for.
-        index : int, optional
-            The index of the data to get.
-        time : pd.Timestamp or str, optional
-            The time to get the data for.
-        freq : str, optional
-            The frequency of the data to get.
-        target_grid : dict, optional
-            The target grid to regrid the data to.
-
-        Returns
-        -------
-        xr.Dataset
-            The regridded dataset.
-        """
-
-        ds = self.get_time_stride(year=year, index=index, time=time, freq=freq)
-        ds = self._regrid_data(ds)
-
+        ds = self.full_dataset.sel(time=slice(t0, t1))
         return ds
 
 
@@ -135,6 +105,7 @@ def is_data_timeseries_safe_for_zarr(
         ds_to_write, zarr_filename, tolerance=tolerance
     )
 
+    open_cached_zarr.cache_clear()
     if data_is_in_zarr:
         raise ValueError(
             f"Dataset not safe for zarr! Data is already in zarr store [{zarr_filename}]."
@@ -169,11 +140,14 @@ def is_data_in_zarr(ds_to_write, zarr_filename, append_dim="time"):
     """
 
     # Open the Zarr store
-    ds_zarr = xr.open_zarr(zarr_filename)
+    ds_zarr = open_cached_zarr(zarr_filename)
 
     # Check if the coordinates match
     coord_zarr = ds_zarr.coords[append_dim]
     coord_ds = ds_to_write.coords[append_dim]
+    # print(coord_ds.time)
+    # print('----')
+    # print(coord_zarr.time)
     if coord_ds.isin(coord_zarr).any():
         return True
     else:
@@ -208,7 +182,7 @@ def is_data_adjacent_timestep(
         True if the data is adjacent, False otherwise.
     """
     # Open the Zarr store
-    ds_zarr = xr.open_zarr(zarr_filename)
+    ds_zarr = open_cached_zarr(zarr_filename)
 
     assert "time" in ds_zarr.coords, "Zarr store must have a 'time' coordinate."
     assert "time" in ds_to_write.coords, (
@@ -228,6 +202,24 @@ def is_data_adjacent_timestep(
     else:
         # print(f"Data is not adjacent to existing data in Zarr store: {zarr_filename}.")
         return False
+
+
+@functools.lru_cache(maxsize=1)
+def open_cached_zarr(fname: Union[str, pathlib.Path]) -> xr.Dataset:
+    """
+    Open a Zarr file, caching the result for future calls.
+
+    Parameters
+    ----------
+    fname : str or pathlib.Path
+        The path to the Zarr file.
+
+    Returns
+    -------
+    xr.Dataset
+        The opened xarray Dataset.
+    """
+    return xr.open_zarr(fname, consolidated=False)
 
 
 def is_data_start_of_year(ds_to_write: xr.Dataset, append_dim="time", tolerance="8D"):
@@ -348,7 +340,7 @@ def save_vars_to_zarrs(
                     continue
                 elif error_handling == "warn":
                     e = str(e).replace("\n", "")
-                    logger.warning(f"Failed to save   {var: <30} {e}")
+                    logger.warning(f"Failed to save   {var: <20} {e}")
                 else:
                     raise ValueError(
                         f"Invalid error_handling option: {error_handling}. Choose 'raise', 'warn', or 'ignore'."

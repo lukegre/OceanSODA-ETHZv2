@@ -25,8 +25,8 @@ class TimestepChecker:
         dtype="float32",
         lon_0_360=False,
     ):
+        from .date_utils import DateWindows
         from .processors import make_target_global_grid
-        from .utils.date_utils import DateWindows
 
         self.spatial_res = spatial_res
         self.time_window = time_window
@@ -37,7 +37,15 @@ class TimestepChecker:
             start_day_of_year=self.start_doy, window_span=self.time_window
         )
 
-    def add_time_bnds(self, ds: xr.Dataset):
+        self.land_points = dict(
+            sahara=(20, 25),
+            australia=(-25, 135),
+            mexico=(20, -100),
+            russia=(60, 100),
+            south_africa=(-33, 20),
+        )
+
+    def add_time_bnds(self, ds: xr.Dataset) -> xr.Dataset:
         """
         Adds bounds to the dataset if they are missing (time).
 
@@ -51,7 +59,7 @@ class TimestepChecker:
         xr.Dataset
             The dataset with time bounds added if they were missing.
         """
-        from .utils.date_utils import DateWindows
+        from .date_utils import DateWindows
 
         if "time_bnds" in ds.coords:
             logger.debug("Time bounds already exist in the dataset.")
@@ -81,7 +89,7 @@ class TimestepChecker:
 
         return ds
 
-    def check_lon_lat(self, ds):
+    def check_lon_lat(self, ds) -> xr.Dataset:
         """
         Checks if the longitude and latitude coordinates are correctly formatted.
 
@@ -121,7 +129,7 @@ class TimestepChecker:
         if (lat != target_lat).all():
             raise ValueError("Latitude values do not match the target grid.")
 
-        return True
+        return ds
 
     def check_land_points(
         self,
@@ -129,19 +137,12 @@ class TimestepChecker:
         land_should_be_nan=True,
         check_first_var_only=True,
         error_handling="raise",
-    ):
+    ) -> xr.Dataset:
         """
         Makes sure that the continents are in the right place.
         We do this by picking a bunch of random points on the map that should be nan
         These are typically on large continents (e.g., sahara, australia, USA, Russia, South Africa)
         """
-        points = dict(
-            sahara=(20, 25),
-            australia=(-25, 135),
-            mexico=(20, -100),
-            russia=(60, 100),
-            south_africa=(-33, 19),
-        )
 
         if error_handling not in ["raise", "warn"]:
             raise ValueError("error_handling must be either 'raise' or 'warn'.")
@@ -152,7 +153,7 @@ class TimestepChecker:
             else:
                 da = ds[key].load()  # load the dataset into memory
 
-                for place, (lat, lon) in points.items():
+                for place, (lat, lon) in self.land_points.items():
                     data_at_point = da.sel(lat=lat, lon=lon, method="nearest")
                     data_is_null = data_at_point.isnull().all().item()
 
@@ -179,9 +180,12 @@ class TimestepChecker:
                     logger.debug(
                         f"Ocean/Land check passed for the first variable [{key}] of the dataset."
                     )
-                    return
+                    break
+        return ds
 
-    def fix_timestep(self, ds: xr.Dataset, fix_threshold=pd.Timedelta("1D")):
+    def fix_timestep(
+        self, ds: xr.Dataset, fix_threshold=pd.Timedelta("1D")
+    ) -> xr.Dataset:
         """
         Checks if the time coordinate matches the expected grid based on the time window
 
@@ -200,7 +204,7 @@ class TimestepChecker:
         xr.Dataset
             If all tests have passed will return the dataset,
         """
-        from .utils.date_utils import DateWindows
+        from .date_utils import DateWindows
 
         assert isinstance(fix_threshold, (pd.Timedelta, type(None))), (
             "fix_threshold must be a pd.Timedelta or None."
@@ -243,7 +247,7 @@ class TimestepChecker:
 
     def check_missing_lon(
         self, ds: xr.Dataset, progressbar=False, check_first_variable_only=True
-    ):
+    ) -> xr.Dataset:
         """
         Mistakes happen - sometimes, longitude is not corrected before interpolation
         resulting in half the image being missing
@@ -253,7 +257,7 @@ class TimestepChecker:
         if progressbar:
             from tqdm.dask import TqdmCallback as ProgressBar
         else:
-            from .utils.download import DummyProgress as ProgressBar
+            from .download import DummyProgress as ProgressBar
 
         for key in ds.data_vars:
             if "lon" in ds[key].dims:
@@ -278,8 +282,9 @@ class TimestepChecker:
                     logger.debug(
                         f"No missing longitude values found in the first variable [{key}] of the dataset."
                     )
-                    return
+                    break
 
         logger.debug(
             f"No missing longitude values found along longitude for all variables of the dataset."
         )
+        return ds

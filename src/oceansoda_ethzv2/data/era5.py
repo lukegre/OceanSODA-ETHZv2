@@ -7,12 +7,11 @@ from pydantic import BaseModel, Field
 
 from .utils.zarr_utils import ZarrDataset
 
-ERA5_URL = "gcs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 TODAY = pd.Timestamp.now().floor("D")
 
 
 class ERA5Entry(BaseModel):
-    product: str = Field("era5", description="ERA5 dataset product name")
+    url: str = Field(..., description="URL to the ERA5 dataset Zarr store")
     time_start: str | None = Field(
         None,
         description="Start time of the dataset, will clip the dataset, None means no clipping",
@@ -28,30 +27,7 @@ class ERA5Entry(BaseModel):
 
 
 class ERA5Dataset(ZarrDataset):
-    def __init__(
-        self,
-        entries: list[dict],
-        spatial_res: float = 0.25,
-        temporal_res: str = "8D",
-        save_path: str = "../data/{temporal_res}_{spatial_res}/{{var}}-{temporal_res}_{spatial_res}.zarr",
-    ):
-        """
-        Initialize the ERA5Dataset with properties.
-        Properties should match the ERA5Entry model.
-
-        Parameters
-        ----------
-        entries : list[dict]
-            A list of dictionaries containing dataset entries.
-        """
-        assert len(entries) == 1, "ERA5Dataset should only contain one entry."
-        self.entries = entries
-        self.spatial_res = spatial_res  # Default spatial resolution in degrees
-        self.temporal_res = temporal_res  # Default window size for temporal resolution
-        self.save_path = save_path.format(
-            temporal_res=temporal_res,
-            spatial_res=f"{str(spatial_res).replace('.', '')}",
-        )
+    checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
     def _open_full_dataset(self) -> xr.Dataset:
         """
@@ -65,7 +41,7 @@ class ERA5Dataset(ZarrDataset):
         return open_era5(self.entries[0])
 
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset:
-        from .processors import standard_regridding
+        from .utils.processors import standard_regridding
 
         if "u10_era5" in ds and "v10_era5" in ds:
             wind_moments = calc_wind_moments(ds)
@@ -120,7 +96,6 @@ class ERA5Dataset(ZarrDataset):
             An instance of ERA5Dataset with the loaded entries.
         """
         entry = ERA5Entry(
-            product="era5",
             time_start=time_start,
             time_end=time_end,
             vars=vars,
@@ -128,49 +103,12 @@ class ERA5Dataset(ZarrDataset):
 
         return cls(entries=[entry], spatial_res=spatial_res, temporal_res=temporal_res)
 
-    def write_timestep_to_disk(
-        self,
-        year: int,
-        index: int,
-        progress: bool = False,
-        check_data_formatting: bool = True,
-    ):
-        """
-        Write a single timestep of the ERA5 dataset to disk.
-
-        Parameters
-        ----------
-        ds : xr.Dataset
-            The xarray Dataset containing the ERA5 data.
-        time : pd.Timestamp
-            The timestamp for the data to be saved.
-        save_path : str, optional
-            The path where the data will be saved, defaults to '../data/era5/{time:%Y%m%d}.zarr'.
-        """
-        from .checker import TimestepChecker
-        from .utils.zarr_utils import save_vars_to_zarrs
-
-        ds = self.get_time_stride_regridded(year=year, index=index)
-
-        if check_data_formatting:
-            checker = TimestepChecker(
-                spatial_res=self.spatial_res, time_window=self.temporal_res
-            )
-            checker.check_lon_lat(ds)
-            ds = checker.fix_timestep(ds)
-            ds = checker.add_time_bnds(ds)
-
-        save_vars_to_zarrs(
-            ds,
-            self.save_path,
-            group_by_year=True,
-            progress=progress,
-            error_handling="warn",
-        )
+    def _validate_entry(self, entry: dict):
+        ERA5Entry(**entry)
 
 
 @functools.lru_cache(maxsize=1)
-def _open_era5_zarr_from_gcs(url: str = ERA5_URL):
+def _open_era5_gcs_zarr(url):
     import xarray
 
     ds = xarray.open_zarr(
@@ -196,14 +134,15 @@ def open_era5(entry: dict):
     xr.Dataset
         The opened xarray Dataset.
     """
-    from .processors import rename_and_drop
+    from .utils.processors import rename_and_drop
 
-    ds = _open_era5_zarr_from_gcs()
+    ds = _open_era5_gcs_zarr(entry["url"])
 
     # Select the time range specified in the entry
     t0 = entry.get("time_start", None)
     t1 = entry.get("time_end", None)
     t1 = t1 if t1 is not None else TODAY
+
     ds = ds.sel(time=slice(t0, t1))
 
     ds_sub = ds.pipe(rename_and_drop, entry.get("vars", {}))

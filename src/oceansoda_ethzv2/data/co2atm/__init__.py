@@ -1,4 +1,4 @@
-from . import mauna_loa, noaa_mbl
+from . import mauna_loa
 
 
 def get_co2atm():
@@ -10,8 +10,8 @@ def get_co2atm():
     from xarray import merge
 
     from ..utils.date_utils import DateWindows
-    from ..utils.smoothing import smooth_iter
     from .noaa_mbl import fix_timestep_offset, regress_seasonal_resid
+    from .smoothing import smooth_iter
 
     dw = DateWindows()
 
