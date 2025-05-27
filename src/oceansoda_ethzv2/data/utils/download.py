@@ -1,11 +1,12 @@
-from functools import lru_cache
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
 import pooch
 import xarray as xr
+from loguru import logger
 from memoization import cached
+from tqdm.dask import TqdmCallback
 
 
 class DummyProgress(object):
@@ -13,16 +14,15 @@ class DummyProgress(object):
     Dummy progress bar for when no progress is needed.
     """
 
-    def __init__(self, desc=None):
-        self.desc = desc
+    def __init__(self, *args, **kwargs): ...
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, *args, **kwargs):
         pass
 
-    def update(self, n=1):
+    def update(self, *args, **kwargs):
         pass
 
 
@@ -87,7 +87,7 @@ def download_w_pooch(url, dest=None, progress=True, **kwargs):
     return filename
 
 
-def chech_if_url_exists(url: str) -> bool:
+def check_if_url_exists(url: str) -> bool:
     """Check if the URL exists by pinging it"""
     import requests
 
@@ -99,14 +99,8 @@ def chech_if_url_exists(url: str) -> bool:
 
 
 def check_if_urls_exist(urls: tuple) -> tuple:
-    from joblib import Parallel, delayed
-
-    kwargs = dict(njobs=-1, backend="threading")
-
-    results = Parallel(**kwargs)(  # type: ignore
-        delayed(chech_if_url_exists)(url) for url in urls
-    )
-    return tuple(results)
+    logger.trace("Checking if URLs exist: {}", urls)
+    return parmap_func(check_if_url_exists, urls)
 
 
 def get_urls_that_exist(urls: tuple) -> tuple[str]:
@@ -118,16 +112,13 @@ def get_urls_that_exist(urls: tuple) -> tuple[str]:
     return tuple(url_list)
 
 
-def data_url_data_in_parallel(urls: tuple[str], url_processor: Callable) -> list:
-    import dask.bag as db
-    from tqdm.dask import TqdmCallback as ProgressBar
+def data_url_data_in_parallel(
+    urls: tuple[str], url_processor: Callable, progress=False
+) -> list:
+    ProgressBar = TqdmCallback if progress else DummyProgress
 
     with ProgressBar(desc=f"Downloading {len(urls)} files"):
-        return (
-            db.from_sequence(urls, npartitions=len(urls))
-            .map(lambda url: url_processor(url) if url else None)
-            .compute(scheduler="threads")
-        )
+        return parmap_func(url_processor, urls)
 
 
 @cached(max_size=8)
@@ -145,19 +136,39 @@ def netcdf_tempfile_reader(
         return ds
 
 
-def download_netcdfs_from_ftp(urls: tuple, netcdf_opender: Callable, **fsspec_kwargs):
+def download_netcdfs_from_ftp(
+    urls: tuple[str, ...], netcdf_opender: Callable, **fsspec_kwargs
+):
     from functools import partial
 
     urls_on_ftp_server = check_urls_on_ftp_server(urls, **fsspec_kwargs)
     url_processor = partial(
         netcdf_tempfile_reader, netcdf_opener=netcdf_opender, **fsspec_kwargs
     )
-
     url_data_in_list = data_url_data_in_parallel(urls_on_ftp_server, url_processor)
 
     return url_data_in_list
 
 
-def make_urls_from_dates(dates: pd.DatetimeIndex, url_template: str) -> tuple[str, ...]:
-    url_list = [(url_template.format(time=date)) for date in dates]
-    return tuple(url_list)
+def make_paths_from_dates(
+    dates: pd.DatetimeIndex, string_template: str
+) -> tuple[str, ...]:
+    path_list = [(string_template.format(time=date)) for date in dates]
+    return tuple(path_list)
+
+
+def parmap_func(
+    func, iterable, n_jobs: Optional[int] = None, sheduler="threads", **kwargs
+):
+    """
+    Apply a function in parallel to an iterable.
+    """
+    from dask import bag as db
+
+    if n_jobs is None or n_jobs > len(iterable):
+        n_jobs = len(iterable)
+
+    bag = db.from_sequence(iterable, npartitions=n_jobs)
+    results = bag.map(func, **kwargs).compute(scheduler=sheduler)
+
+    return results

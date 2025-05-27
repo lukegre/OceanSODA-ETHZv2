@@ -1,4 +1,5 @@
-from functools import cached_property, lru_cache
+import pathlib
+from functools import cached_property, lru_cache, partial
 from typing import Optional
 
 import numpy as np
@@ -23,7 +24,7 @@ class SODADataset(CoreDataset):
         spatial_res=0.25,
         window_span="8D",
         save_path: str = "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr",
-        url="http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc",
+        source_path="http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc",
         vars={},
         fsspec_kwargs={},
         **kwargs,
@@ -32,7 +33,7 @@ class SODADataset(CoreDataset):
         Initialize the SODADataset with properties.
         """
 
-        self.url_template = url
+        self.source_path = source_path
         self.vars = vars
         self.fsspec_kwargs = fsspec_kwargs
         self.spatial_res = spatial_res  # Default spatial resolution in degrees
@@ -42,8 +43,7 @@ class SODADataset(CoreDataset):
             spatial_res=f"{str(spatial_res).replace('.', '')}",
         )
 
-    @lru_cache
-    def get_timestep_unprocessed(
+    def _get_unprocessed_timestep_remote(
         self,
         year: Optional[int] = None,
         index: Optional[int] = None,
@@ -71,13 +71,13 @@ class SODADataset(CoreDataset):
         from .utils.download import (
             data_url_data_in_parallel,
             get_urls_that_exist,
-            make_urls_from_dates,
+            make_paths_from_dates,
         )
 
         time = self.date_windows.get_window_center(time=time, year=year, index=index)
 
         dates = make_dates_for_extended_window(time=time, window_span=self.window_span)
-        urls = make_urls_from_dates(dates, url_template=self.url_template)
+        urls = make_paths_from_dates(dates, string_template=self.source_path)
         urls = get_urls_that_exist(urls)
 
         logger.debug(
@@ -85,24 +85,53 @@ class SODADataset(CoreDataset):
             f" be clipped down to {self.window_span}"
         )
 
-        ds_list = data_url_data_in_parallel(urls, self._netcdf_reader)
+        ds_list = data_url_data_in_parallel(urls, self._remote_netcdf_reader)
         ds = xr.concat(ds_list, dim="time")
         ds = ds.assign_attrs(requested_time=time)
 
         return ds
 
-    @cached_property  # using cached_property to avoid recomputing the reader, thus nulling the cache
-    def _netcdf_reader(self):
-        from functools import partial
+    def _get_unprocessed_timestep_local(
+        self,
+        year: int | None = None,
+        index: int | None = None,
+        time: Optional[pd.Timestamp | str] = None,
+    ) -> xr.Dataset:
+        from .utils.download import make_paths_from_dates
 
+        time = self.date_windows.get_window_center(time=time, year=year, index=index)
+        dates = make_dates_for_extended_window(time=time, window_span=self.window_span)
+        paths = make_paths_from_dates(dates, string_template=self.source_path)
+        paths = tuple([str(path) for path in paths if pathlib.Path(path).exists()])
+
+        ds_list = [self._opener(path) for path in paths]
+        ds = xr.concat(ds_list, dim="time").assign_attrs(requested_time=time)
+
+        return ds
+
+    @cached_property  # using cached_property to avoid recomputing the reader, thus nulling the cache
+    def _remote_netcdf_reader(self):
         from .utils.download import netcdf_tempfile_reader
 
-        open_soda_custom = partial(open_soda_file, vars_rename=self.vars)
         url_processor = partial(
-            netcdf_tempfile_reader, netcdf_opener=open_soda_custom, **self.fsspec_kwargs
+            netcdf_tempfile_reader, netcdf_opener=self._opener, **self.fsspec_kwargs
         )
 
         return url_processor
+
+    def _opener(self, fname):
+        from .utils.processors import preprocessor_generic
+
+        logger.trace("reading in SODA file: {}", fname)
+        ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
+        ds = preprocessor_generic(
+            ds,
+            vars_rename=self.vars,
+            depth_idx=0,
+            coords_duplicate_check=["lat", "lon"],
+        )
+
+        return ds
 
     def _regrid_data(self, ds) -> xr.Dataset:
         from .utils.processors import make_target_global_grid

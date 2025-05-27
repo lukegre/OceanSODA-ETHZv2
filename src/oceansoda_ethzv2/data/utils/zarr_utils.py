@@ -1,15 +1,16 @@
-import functools
 import pathlib
-import pprint
 from abc import ABC, abstractmethod
-from typing import Optional, Union, final
+from functools import cached_property, lru_cache
+from typing import Literal, Optional, Union, final
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 from loguru import logger
+from tqdm.dask import TqdmCallback
 
 from .core import CoreDataset
+from .download import DummyProgress
 
 
 class ZarrDataset(CoreDataset, ABC):
@@ -48,13 +49,14 @@ class ZarrDataset(CoreDataset, ABC):
     def _validate_entry(self, entry: dict): ...
 
     @abstractmethod
+    @lru_cache(maxsize=1)
     def _open_full_dataset(self) -> xr.Dataset: ...
 
     @abstractmethod
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset: ...
 
     @final
-    @functools.cached_property
+    @property
     def full_dataset(self) -> xr.Dataset:
         """
         Get the CMEMS dataset as an xarray Dataset.
@@ -63,8 +65,7 @@ class ZarrDataset(CoreDataset, ABC):
         return self._open_full_dataset()
 
     @final
-    @functools.lru_cache
-    def get_timestep_unprocessed(
+    def _get_unprocessed_timestep_remote(
         self,
         year: Optional[int] = None,
         index: Optional[int] = None,
@@ -85,126 +86,159 @@ class ZarrDataset(CoreDataset, ABC):
         return ds
 
 
-def is_data_timeseries_safe_for_zarr(
-    ds_to_write, zarr_filename, append_dim="time", tolerance="8D"
-):
-    data_is_start_of_year = is_data_start_of_year(
-        ds_to_write, append_dim=append_dim, tolerance=tolerance
-    )
-    zarr_file_exists = pathlib.Path(zarr_filename).exists()
-
-    if not zarr_file_exists and data_is_start_of_year:
-        return True
-    elif not zarr_file_exists and not data_is_start_of_year:
-        raise ValueError(
-            f"Dataset not safe for zarr: data is not at the start of the year and writing new file [{zarr_filename}]. "
-        )
-
-    data_is_in_zarr = is_data_in_zarr(ds_to_write, zarr_filename, append_dim=append_dim)
-    data_is_adjacent = is_data_adjacent_timestep(
-        ds_to_write, zarr_filename, tolerance=tolerance
-    )
-
-    open_cached_zarr.cache_clear()
-    if data_is_in_zarr:
-        raise ValueError(
-            f"Dataset not safe for zarr! Data is already in zarr store [{zarr_filename}]."
-        )
-    elif not data_is_adjacent:
-        raise ValueError(
-            f"Dataset not safe for zarr: data is not adjacent to existing data in zarr store [{zarr_filename}]."
-        )
-    else:
-        return True
-
-
-def is_data_in_zarr(ds_to_write, zarr_filename, append_dim="time"):
+def is_time_safe_for_zarr(
+    time: pd.Timestamp, zarr_filename: str, dim_name="time", window_span: str = "8D"
+) -> tuple[bool, str]:
     """
-    Check if the data is already written in the Zarr store.
-
-    This needs a more nuanced approach since append does not
-    check if the data is already written, and will simply add
-    a duplicate.
+    Check if a given time is safe to write to the Zarr store.
 
     Parameters
     ----------
-    ds_to_write : xarray.Dataset
-        The dataset to be written to the Zarr store.
+    time : pd.Timestamp
+        The time to check.
     zarr_filename : str
         The path to the Zarr store.
+    dim_name : str, optional
+        The name of the dimension to check. Default is 'time'.
+    window_span : str, optional
+        The window_span for adjacency check, e.g., '8D' for 8 days. Default is '8D'.
 
     Returns
     -------
     bool
-        True if the data is already written, False otherwise.
+        True if the time is safe to write, False otherwise.
+    str
+        A message indicating the status of the time check.
     """
+    from .date_utils import DateWindows
 
-    # Open the Zarr store
-    ds_zarr = open_cached_zarr(zarr_filename)
+    year, index = DateWindows(window_span=window_span).get_index(time=time)
 
-    # Check if the coordinates match
-    coord_zarr = ds_zarr.coords[append_dim]
-    coord_ds = ds_to_write.coords[append_dim]
-    # print(coord_ds.time)
-    # print('----')
-    # print(coord_zarr.time)
-    if coord_ds.isin(coord_zarr).any():
-        return True
-    else:
-        # print(f"Data is already in Zarr store: {zarr_filename}.")
-        return False
+    messages = {
+        "exists": f"Given timestep [{year=}, {index=}] already exists in {zarr_filename}",
+        "not_adjacent": f"Given timestep [{year=}, {index=}] but expected index [{{expected_index}}] in {zarr_filename}",
+        "not_first": f"File {zarr_filename} does not exist, but the timestep [{year=}, {index=}] is not the first step in the year",
+    }
+
+    if not pathlib.Path(zarr_filename).exists():
+        if is_time_first_in_year(time, window_span):
+            return True, ""
+        else:
+            return False, messages["not_first"]
+
+    ds = open_cached_zarr(zarr_filename)
+
+    if is_time_in_dataset(time, ds, dim_name):
+        return False, messages["exists"]
+    if not is_time_adjacent_timestep(time, ds, dim_name, window_span):
+        zarr_n_timesteps = ds[dim_name].size
+        return False, messages["not_adjacent"].format(expected_index=zarr_n_timesteps)
+
+    # finally if all checks passed, return True
+    return True, ""
 
 
-def is_data_adjacent_timestep(
-    ds_to_write: xr.Dataset, zarr_filename: str, tolerance: str = "8D"
-):
+def is_time_in_dataset(
+    time: pd.Timestamp, ds: xr.Dataset, dim_name: str = "time"
+) -> bool:
     """
-    Check if the coordinate along the `append_dim` is adjacent to the
-    existing data in the Zarr store.
-
-    This is useful to determine if the data can be appended without
-    creating a gap in the time series.
+    Check if a given time is present in the dataset along the specified dimension.
 
     Parameters
     ----------
-    ds_to_write : xarray.Dataset
-        The dataset to be checked for adjacency.
-    zarr_filename : str
-        The path to the Zarr store.
-    append_dim : str, optional
-        The dimension along which to check adjacency. Default is 'time'.
-    tolerance : str, optional
-        The tolerance for adjacency check, e.g., '8D' for 8 days. Default is '8D'.
+    time : pd.Timestamp
+        The time to check.
+    ds : xr.Dataset
+        The dataset to check against.
+    dim_name : str, optional
+        The name of the dimension to check. Default is 'time'.
 
     Returns
     -------
     bool
-        True if the data is adjacent, False otherwise.
+        True if the time is present in the dataset, False otherwise.
     """
-    # Open the Zarr store
-    ds_zarr = open_cached_zarr(zarr_filename)
-
-    assert "time" in ds_zarr.coords, "Zarr store must have a 'time' coordinate."
-    assert "time" in ds_to_write.coords, (
-        "Dataset to write must have a 'time' coordinate."
-    )
-
-    # Get the coordinates along the append dimension
-    last_in_zarr = ds_zarr.coords["time"][-1].values
-    first_in_ds = ds_to_write.coords["time"][0].values
-
-    dt = pd.Timedelta(tolerance)
-    # Check if the difference is within the tolerance
-    diff_abs = abs(first_in_ds - last_in_zarr)
-
-    if diff_abs <= dt:
+    ds_time = ds.coords[dim_name].to_index()
+    if any(ds_time == time):
         return True
     else:
-        # print(f"Data is not adjacent to existing data in Zarr store: {zarr_filename}.")
         return False
 
 
-@functools.lru_cache(maxsize=1)
+def is_time_adjacent_timestep(
+    time: pd.Timestamp, ds: xr.Dataset, dim_name="time", window_span="8D"
+) -> bool:
+    """
+    Check if a given time is adjacent to the existing data in the dataset along the specified dimension.
+
+    Parameters
+    ----------
+    time : pd.Timestamp
+        The time to check.
+    ds : xr.Dataset
+        The dataset to check against.
+    dim_name : str, optional
+        The name of the dimension to check. Default is 'time'.
+    window_span : str, optional
+        The window_span for adjacency check, e.g., '8D' for 8 days. Default is '8D'.
+
+    Returns
+    -------
+    bool
+        True if the time is adjacent, False otherwise.
+    """
+
+    ds_time = ds.coords[dim_name].to_index()
+
+    if len(ds_time) == 0:
+        return True  # If no data exists, any time is considered adjacent
+
+    last_in_ds = ds_time[-1]
+
+    if time <= last_in_ds:
+        return False  # Time must be after the last time in the dataset
+
+    diff_abs = abs(time - last_in_ds)
+
+    dt = pd.Timedelta(window_span)
+    return (
+        diff_abs <= dt
+    )  # time lies within the window_span of the last time in the dataset
+
+
+def is_time_first_in_year(time: pd.Timestamp, window_span: str = "8D") -> bool:
+    """
+    Check if the given time is the first time step of the year within a specified window_span.
+
+    Parameters
+    ----------
+    time : pd.Timestamp
+        The time to check.
+    window_span : str, optional
+        The window_span for adjacency check, e.g., '8D' for 8 days. Default is '8D'.
+
+    Returns
+    -------
+    bool
+        True if the time is the first time step of the year within the window_span, False otherwise.
+    """
+
+    year = time.year
+    first_of_year = pd.Timestamp(f"{year}-01-01")
+    first_window = first_of_year + pd.Timedelta(window_span)
+
+    if time < first_of_year:
+        logger.critical(
+            "Something very wrong has happened. Date is less than Jan 1st of the year."
+        )
+        return False
+    if time >= first_window:
+        return False
+    else:
+        return True
+
+
+@lru_cache(maxsize=1)
 def open_cached_zarr(fname: Union[str, pathlib.Path]) -> xr.Dataset:
     """
     Open a Zarr file, caching the result for future calls.
@@ -222,44 +256,28 @@ def open_cached_zarr(fname: Union[str, pathlib.Path]) -> xr.Dataset:
     return xr.open_zarr(fname, consolidated=False)
 
 
-def is_data_start_of_year(ds_to_write: xr.Dataset, append_dim="time", tolerance="8D"):
-    """
-    Concernting time series, if it is the first step to be written to the file,
-    then it must be within the tolerance of the start of any given year
-
-    Parameters
-    ----------
-    ds_to_write : xarray.Dataset
-        The dataset to be checked.
-    zarr_filename : str
-        The path to the Zarr store.
-    append_dim : str, optional
-        The dimension along which to check adjacency. Default is 'time'.
-    tolerance : str, optional
-        The tolerance for adjacency check, e.g., '8D' for 8 days. Default is '8D'.
-
-    Returns
-    -------
-    bool
-        True if the data is the first write, False otherwise.
-    """
-
-    first_in_ds = ds_to_write[append_dim][0].values
-    first_in_ds = pd.Timestamp(first_in_ds)
-
-    year = first_in_ds.year
-    first_of_year = pd.Timestamp(f"{year}-01-01")
-    diff = first_in_ds - first_of_year
-    dt = pd.Timedelta(tolerance)
-    diff_abs = abs(diff)
-    if diff_abs < dt:
-        return True
-    else:
-        # print(f"Data is not within the tolerance of the start of the year: {first_in_ds}.")
-        return False
+def _check_single_year(ds: xr.Dataset):
+    year = np.unique(ds.time.dt.year.values)
+    if len(year) != 1:
+        raise ValueError(f"Dataset must contain data for a single year, found: {year}")
 
 
-def save_to_zarr(ds, fname, append_dim="time", tolerance="8D", progress=False):
+def _check_single_timestep(ds: xr.Dataset) -> None:
+    time_index = ds.time.to_index()
+    if len(time_index) != 1:
+        raise ValueError(
+            f"Dataset must contain a single time step, found: {len(time_index)}"
+        )
+
+
+def save_to_zarr(
+    ds: xr.Dataset,
+    zarr_filename: str,
+    append_dim: str = "time",
+    window_span: str = "8D",
+    progress: bool = False,
+    error_handling: Literal["raise", "warn", "ignore"] = "raise",
+) -> None:
     """
     Save the xarray Dataset to a Zarr file.
 
@@ -270,42 +288,44 @@ def save_to_zarr(ds, fname, append_dim="time", tolerance="8D", progress=False):
     fname : str
         The path to the Zarr file.
     """
-    if progress:
-        from tqdm.dask import TqdmCallback as ProgressBar
-    else:
-        from .download import DummyProgress as ProgressBar
+    ProgressBar = TqdmCallback if progress else DummyProgress
 
-    from .date_utils import DateWindows
+    _check_single_year(ds)
+    _check_single_timestep(ds)
 
-    dw = DateWindows(window_span=tolerance)
+    time = ds.time.to_index()[0]
 
-    year = np.unique(ds.time.dt.year.values)
-    if len(year) != 1:
-        raise ValueError(f"Dataset must contain data for a single year, found: {year}")
-    group = str(year[0])
-    fname = pathlib.Path(fname)
-    if not is_data_timeseries_safe_for_zarr(
-        ds, fname / group, append_dim="time", tolerance="8D"
-    ):
-        raise ValueError(f"Data is not safe to write to Zarr store: {fname}")
+    group = str(time.year)
+    fname = pathlib.Path(zarr_filename)
+    fname_group = fname / group
 
-    # Ensure the directory exists
+    safe_for_zarr, message = is_time_safe_for_zarr(
+        time, str(fname_group), window_span=window_span
+    )
+
+    if not safe_for_zarr:
+        match error_handling:
+            case "raise":
+                raise ValueError(message)
+            case "warn":
+                logger.warning(f"Skipping saving: {message}")
+                return
+            case "ignore":
+                logger.trace(f"Skipping saving {fname} due to: {message}")
+                return
+
     fname.parent.mkdir(parents=True, exist_ok=True)
-
     # Save the dataset to Zarr format
-    props = {
-        "consolidated": True,
-        "mode": "a" if (fname / group).exists() else "w",
-        "append_dim": append_dim if (fname / group).exists() else None,
-        "compute": True,
-        "group": None if group == "" else group,
-    }
-
-    time_str = ds.time.dt.strftime("%Y-%m-%d").values[0]
-    _, index = dw.get_index(time=time_str)
-    name = f"{fname}/{group}:{index}"
+    name = f"{fname}/{group}:{time:%Y-%m-%d %H:%M}"
     with ProgressBar(desc=f"Saving {name}"):
-        ds.to_zarr(fname, **props)
+        logger.info(f"Starting to write {fname} for time {time}")
+        ds.to_zarr(
+            store=fname,
+            mode="a" if (fname_group).exists() else "w",
+            append_dim=append_dim if (fname_group).exists() else None,
+            group=None if group == "" else group,
+        )
+
     logger.success(f"Saved to: {name}")
 
 
@@ -314,7 +334,8 @@ def save_vars_to_zarrs(
     fname_fmt: str,
     group_by_year: bool = True,
     progress=False,
-    error_handling="raise",
+    window_span="8D",
+    error_handling: Literal["raise", "warn", "ignore"] = "raise",
 ):
     assert "{var}" in fname_fmt, "`fname_fmt` must contain a {var} placeholder"
 
@@ -329,19 +350,11 @@ def save_vars_to_zarrs(
     for var in ds.data_vars:
         fname = pathlib.Path(fname_fmt.format(var=var))
         fname.parent.mkdir(exist_ok=True, parents=True)
-
-        if error_handling == "raise":
-            save_to_zarr(ds[[var]], fname, tolerance="8D", progress=progress)
-        else:
-            try:
-                save_to_zarr(ds[[var]], fname, tolerance="8D", progress=progress)
-            except Exception as e:
-                if error_handling == "ignore":
-                    continue
-                elif error_handling == "warn":
-                    e = str(e).replace("\n", "")
-                    logger.warning(f"Failed to save   {var: <20} {e}")
-                else:
-                    raise ValueError(
-                        f"Invalid error_handling option: {error_handling}. Choose 'raise', 'warn', or 'ignore'."
-                    )
+        ds_var = ds[[var]]
+        save_to_zarr(
+            ds=ds_var,
+            zarr_filename=str(fname),
+            window_span=window_span,
+            progress=progress,
+            error_handling=error_handling,
+        )

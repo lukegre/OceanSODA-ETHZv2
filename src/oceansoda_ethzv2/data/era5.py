@@ -1,4 +1,4 @@
-import functools
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -11,7 +11,7 @@ TODAY = pd.Timestamp.now().floor("D")
 
 
 class ERA5Entry(BaseModel):
-    url: str = Field(..., description="URL to the ERA5 dataset Zarr store")
+    source_path: str = Field(..., description="URL to the ERA5 dataset Zarr store")
     time_start: str | None = Field(
         None,
         description="Start time of the dataset, will clip the dataset, None means no clipping",
@@ -29,6 +29,7 @@ class ERA5Entry(BaseModel):
 class ERA5Dataset(ZarrDataset):
     checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
+    @lru_cache(maxsize=1)
     def _open_full_dataset(self) -> xr.Dataset:
         """
         Open the ERA5 dataset based on the properties defined in this instance.
@@ -38,7 +39,24 @@ class ERA5Dataset(ZarrDataset):
         xr.Dataset
             The full ERA5 dataset as an xarray Dataset.
         """
-        return open_era5(self.entries[0])
+        from .utils.processors import rename_and_drop
+
+        entry = self.entries[0]
+        ds = self._open_era5_gcs_zarr(entry["source_path"])
+
+        # Select the time range specified in the entry
+        t0 = entry.get("time_start", None)
+        t1 = entry.get("time_end", None)
+        t1 = t1 if t1 is not None else TODAY
+
+        ds = ds.sel(time=slice(t0, t1))
+
+        ds_sub = ds.pipe(rename_and_drop, entry.get("vars", {}))
+        ds_sub["flag_era5nrt"] = make_era5_nrt_flags(ds_sub)
+
+        ds_sub = ds_sub.chunk({"time": 24, "lat": -1, "lon": -1})  # for lazy loading
+
+        return ds_sub
 
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset:
         from .utils.processors import standard_regridding
@@ -63,94 +81,20 @@ class ERA5Dataset(ZarrDataset):
 
         return ds
 
-    @classmethod
-    def init_with_defaults(
-        cls,
-        spatial_res: float = 0.25,  # Default spatial resolution in degrees
-        temporal_res: str = "8D",  # Default temporal resolution
-        time_start="1982-01-01",
-        time_end=None,
-        vars: dict[str, str] | None = {
-            "latitude": "lat",
-            "longitude": "lon",
-            "mean_sea_level_pressure": "msl_era5",
-            "10m_u_component_of_wind": "u10_era5",
-            "10m_v_component_of_wind": "v10_era5",
-        },
-    ):
-        """
-        Load the ERA5 dataset with default parameters.
-
-        Parameters
-        ----------
-        time_start : str, optional
-            Start time of the dataset, defaults to '1982-01-01'.
-        time_end : str, optional
-            End time of the dataset, defaults to None (no clipping).
-        vars : dict[str, str] | None, optional
-            Variables to rename in the dataset, defaults to an empty dictionary.
-
-        Returns
-        -------
-        ERA5Dataset
-            An instance of ERA5Dataset with the loaded entries.
-        """
-        entry = ERA5Entry(
-            time_start=time_start,
-            time_end=time_end,
-            vars=vars,
-        ).model_dump()  # Convert to dictionary
-
-        return cls(entries=[entry], spatial_res=spatial_res, temporal_res=temporal_res)
-
     def _validate_entry(self, entry: dict):
         ERA5Entry(**entry)
 
+    @lru_cache(maxsize=1)
+    def _open_era5_gcs_zarr(self, url):
+        import xarray
 
-@functools.lru_cache(maxsize=1)
-def _open_era5_gcs_zarr(url):
-    import xarray
+        ds = xarray.open_zarr(
+            url,
+            chunks=None,  # type: ignore
+            storage_options=dict(token="anon"),
+        )
 
-    ds = xarray.open_zarr(
-        url,
-        chunks=None,  # type: ignore
-        storage_options=dict(token="anon"),
-    )
-
-    return ds
-
-
-def open_era5(entry: dict):
-    """
-    Open a single ERA5 dataset based on the provided entry dictionary.
-
-    Parameters
-    ----------
-    entry : dict
-        A dictionary containing the dataset entry information.
-
-    Returns
-    -------
-    xr.Dataset
-        The opened xarray Dataset.
-    """
-    from .utils.processors import rename_and_drop
-
-    ds = _open_era5_gcs_zarr(entry["url"])
-
-    # Select the time range specified in the entry
-    t0 = entry.get("time_start", None)
-    t1 = entry.get("time_end", None)
-    t1 = t1 if t1 is not None else TODAY
-
-    ds = ds.sel(time=slice(t0, t1))
-
-    ds_sub = ds.pipe(rename_and_drop, entry.get("vars", {}))
-    ds_sub["flag_era5nrt"] = make_era5_nrt_flags(ds_sub)
-
-    ds_sub = ds_sub.chunk({"time": 1, "lat": -1, "lon": -1})  # for lazy loading
-
-    return ds_sub
+        return ds
 
 
 def make_era5_nrt_flags(ds: xr.Dataset) -> xr.DataArray:

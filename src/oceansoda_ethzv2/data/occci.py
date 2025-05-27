@@ -1,10 +1,10 @@
+import pathlib
 from functools import lru_cache, partial
 from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
 import xarray as xr
-from icecream import ic as print
 
 from .utils.core import CoreDataset
 from .utils.date_utils import DateWindows
@@ -20,7 +20,7 @@ class OCCCIDataset(CoreDataset):
         spatial_res=0.25,
         window_span="8D",
         save_path: str = "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr",
-        url: str = OCCCI_URL,
+        source_path: str = OCCCI_URL,
         fsspec_kwargs: dict = {},
         vars: dict[str, str] = {},
         **kwargs,
@@ -28,7 +28,7 @@ class OCCCIDataset(CoreDataset):
         """
         Initialize the OCCCIDataset with properties.
         """
-        self.url = url
+        self.source_path = source_path
         self.spatial_res = spatial_res  # Default spatial resolution in degrees
         self.window_span = window_span  # Default window size for temporal resolution
         self.fsspec_kwargs = (
@@ -39,21 +39,42 @@ class OCCCIDataset(CoreDataset):
             window_span=window_span, spatial_res=f"{str(spatial_res).replace('.', '')}"
         )
 
-    @lru_cache
-    def get_timestep_unprocessed(
+    def _get_unprocessed_timestep_remote(
         self,
         year: Optional[int] = None,
         index: Optional[int] = None,
         time: Optional[pd.Timestamp | str] = None,
     ) -> xr.Dataset:
-        time = self.date_windows.get_window_center(year=year, index=index, time=time)
-        ds = get_occci_timestep(
-            time,
-            window_span=self.window_span,
-            vars_rename=self.vars,
-            fsspec_kwargs=self.fsspec_kwargs,
-        )
+        from .utils.download import download_netcdfs_from_ftp, make_paths_from_dates
 
+        time = self.date_windows.get_window_center(year=year, index=index, time=time)
+        dates = self.date_windows.get_window_dates(time=time)
+        urls = make_paths_from_dates(dates, string_template=self.source_path)
+
+        ds_list = download_netcdfs_from_ftp(
+            urls=urls, netcdf_opender=self._opener, **self.fsspec_kwargs
+        )
+        ds = xr.concat(ds_list, dim="time").chunk({"time": 1, "lat": -1, "lon": -1})
+
+        return ds
+
+    def _get_unprocessed_timestep_local(
+        self,
+        year: int | None = None,
+        index: int | None = None,
+        time: Optional[pd.Timestamp | str] = None,
+    ) -> xr.Dataset:
+        from .utils.download import make_paths_from_dates
+
+        time = self.date_windows.get_window_center(year=year, index=index, time=time)
+        dates = self.date_windows.get_window_dates(time=time)
+
+        paths = make_paths_from_dates(dates, self.source_path)
+        paths = [path for path in paths if pathlib.Path(path).exists()]
+
+        ds_list = [self._opener(path) for path in paths]
+        ds = xr.concat(ds_list, dim="time")
+        ds = ds.chunk({"time": 1, "lat": -1, "lon": -1})
         return ds
 
     def _regrid_data(self, ds) -> xr.Dataset:
@@ -67,89 +88,15 @@ class OCCCIDataset(CoreDataset):
 
         return ds
 
+    def _opener(self, fname: str) -> xr.Dataset:
+        """
+        Open the dataset from a file name.
+        """
+        from .utils.processors import preprocessor_generic
 
-def get_occci_timestep(
-    time: pd.Timestamp,
-    window_span="8D",
-    vars_rename: dict = {
-        "chlor_a": "chl_occci",
-        "chlor_a_log10_rmsd": "chl_occci_sigma_uncert",
-    },
-    fsspec_kwargs: dict = {},
-):
-    """"""
-    from .utils.download import download_netcdfs_from_ftp
+        ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
+        ds = preprocessor_generic(
+            ds=ds, vars_rename=self.vars, depth_idx=None, coords_duplicate_check=[]
+        )
 
-    urls = make_occci_urls(time, window_span=window_span)
-    opener = partial(open_occci_dataset, vars_rename=vars_rename)
-    ds_list = download_netcdfs_from_ftp(urls, netcdf_opender=opener, **fsspec_kwargs)
-
-    ds_hr = xr.concat(ds_list, dim="time").chunk({"time": 1, "lat": -1, "lon": -1})
-    return ds_hr
-
-
-def download_netcdfs_from_ftp(urls: tuple, netcdf_opender: Callable, **fsspec_kwargs):
-    from functools import partial
-
-    from .utils.download import (
-        check_urls_on_ftp_server,
-        data_url_data_in_parallel,
-        netcdf_tempfile_reader,
-    )
-
-    urls_on_ftp_server = check_urls_on_ftp_server(urls, **fsspec_kwargs)
-    url_processor = partial(
-        netcdf_tempfile_reader, netcdf_opener=netcdf_opender, **fsspec_kwargs
-    )
-
-    url_data_in_list = data_url_data_in_parallel(urls_on_ftp_server, url_processor)
-
-    return url_data_in_list
-
-
-def open_occci_dataset(
-    fname: str,
-    vars_rename: Optional[dict] = {
-        "chlor_a": "chl_occci",
-        "chlor_a_log10_rmsd": "chl_occci_sigma_uncert",
-    },
-):
-    from .utils.processors import preprocessor_generic
-
-    ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
-    ds = preprocessor_generic(
-        ds, vars_rename=vars_rename, depth_idx=None, coords_duplicate_check=[]
-    )
-
-    return ds
-
-
-def make_occci_urls(time, window_span="8D"):
-    """
-    Create URLs for the OCCI dataset based on a given time and window span.
-
-    Args:
-        time (pd.Timestamp): The timestamp for which to create the URLs.
-        window_span (str): The span of the window, e.g., "8D" for 8 days.
-
-    Returns:
-        tuple: A tuple of URLs for the OCCI dataset.
-    """
-    from .utils.download import make_urls_from_dates
-
-    dates = make_dates_for_window(time=time, window_span=window_span)
-    urls = make_urls_from_dates(dates, url_template=OCCCI_URL)
-    return urls
-
-
-def make_dates_for_window(
-    time: Optional[pd.Timestamp] = None,
-    year: Optional[int] = None,
-    index: Optional[int] = None,
-    window_span="8D",
-) -> pd.DatetimeIndex:
-    dw = DateWindows(window_span=window_span)
-    year, index = dw.get_index(time=time, year=year, index=index)  # type: ignore
-
-    window_dates = dw.get_window_dates(year=year, index=index)
-    return window_dates
+        return ds

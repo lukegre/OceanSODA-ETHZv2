@@ -4,7 +4,7 @@ import xarray as xr
 from loguru import logger
 
 
-class TimestepChecker:
+class TimestepValidator:
     """
     DataChecker class for checking that the data has the correct grid
     with the appropriate metadata attributes.

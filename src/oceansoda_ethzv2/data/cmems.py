@@ -1,7 +1,7 @@
-import functools
 import pathlib
 import pprint
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, Union
 
 import munch
@@ -41,17 +41,27 @@ class CMEMSEntry(BaseModel):
         description="Variables to rename in the dataset, e.g. {'analysed_sst': 'sst'}",
     )
     # check that login dictionary has "username" and "password" keys that both have strings as values
-    login: LoginInfo | None = {}
+    login: LoginInfo | None = Field(
+        None,
+        description="Login information for CMEMS, if required. Should contain 'username' and 'password'.",
+    )
 
 
 class CMEMSDataset(ZarrDataset):
     checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
+    @lru_cache(maxsize=1)
     def _open_full_dataset(self) -> xr.Dataset:
         """
         Open the CMEMS dataset based on the properties defined in this instance.
         """
-        return open_cmems_datasets(self.entries)
+        if len(self.entries) == 0:
+            raise ValueError("self.entries cannot be empty")
+        ds_list = [open_cmems_dataset(entry) for entry in self.entries]
+        ds = xr.concat(ds_list, dim="time")
+        ds = ds.chunk({"time": 1, "lat": -1, "lon": -1})
+
+        return ds
 
     def _regrid_data(self, ds) -> xr.Dataset:
         from .utils.processors import standard_regridding
@@ -99,7 +109,7 @@ class CMEMSCatalog:
 
         logging.getLogger("copernicusmarine").setLevel(logging.WARNING)
         if self.login is not {}:
-            login(**self.login, force_overwrite=True, check_credentials_valid=True)
+            login(force_overwrite=True, check_credentials_valid=True, **self.login)
             logger.info(
                 "Successfully authenticated with CMEMS using provided credentials, and persisted credentials."
             )
@@ -169,7 +179,7 @@ class CMEMSCatalog:
                 )
             )
 
-    @functools.lru_cache(maxsize=2)
+    @lru_cache(maxsize=2)
     def _get_timestep(self, key: tuple[int, int]) -> xr.Dataset:
         """
         Internal method to get a specific timestep from a dataset.
@@ -203,18 +213,24 @@ class CMEMSCatalog:
             )
 
 
-@cached(max_size=7)
+@cached(max_size=8)
 def open_cmems_dataset(entry: dict) -> xr.Dataset:
+    import logging
+
     from copernicusmarine import open_dataset
 
     from .utils.processors import rename_and_drop
 
     CMEMSEntry(**entry)  # Validate the entry against the CMEMSEntry model
 
+    logger.info(f"Opening CMEMS dataset [{entry['id']}]")
     logger.debug(
         "Opening CMEMS dataset with properties: \n{}",
         pprint.pformat(entry, sort_dicts=False),
     )
+
+    # Suppress copernicusmarine logging
+    logging.getLogger("copernicusmarine").setLevel(logging.CRITICAL)
     ds_all = open_dataset(entry["id"])
 
     t0 = entry.get("time_start", None)
@@ -228,14 +244,6 @@ def open_cmems_dataset(entry: dict) -> xr.Dataset:
         ds_sub[key] = make_flag_along_dim(ds_sub, entry["flag"])
 
     return ds_sub
-
-
-def open_cmems_datasets(entry_list: list[dict]) -> xr.Dataset:
-    if len(entry_list) == 0:
-        raise ValueError("entry_list cannot be empty")
-    ds_list = [open_cmems_dataset(entry) for entry in entry_list]
-    ds = xr.concat(ds_list, dim="time")
-    return ds
 
 
 def make_flag_along_dim(

@@ -1,4 +1,3 @@
-import pathlib
 from typing import Optional
 
 import munch
@@ -35,7 +34,12 @@ def standard_regridding(
     return ds
 
 
-def preprocessor_generic(ds, vars_rename={}, depth_idx=None, coords_duplicate_check=[]):
+def preprocessor_generic(
+    ds: xr.Dataset,
+    vars_rename: dict = {},
+    depth_idx: Optional[int] = None,
+    coords_duplicate_check: list[str] = [],
+):
     """
     The preprocessor does everything that can be done on a single
     file (e.g. renaming variables, dropping dimensions, etc.)
@@ -209,29 +213,3 @@ def coarsen_toward_target_grid(
     )
 
     return out
-
-
-def make_file_list(catalog_entry, year):
-    flist_0 = catalog_entry.glob(year=year - 1).tolist()[-1:]
-    flist_1 = catalog_entry.glob(year=year).tolist()
-    flist_2 = catalog_entry.glob(year=year + 1).tolist()[:1]
-    flist = np.array(flist_0 + flist_1 + flist_2)
-
-    return flist
-
-
-def save_var_to_zarr(
-    ds,
-    dest="../data/{res_days}_{res_deg_str}/{var}_{product}-{res_days}_{res_deg_str}.zarr",
-    **kwargs,
-):
-    assert "{var}" in dest, "`dest` must contain a {var} placeholder"
-
-    ds = ds.chunk({"time": 1, "lat": 360, "lon": 360})
-
-    for var in ds.data_vars:
-        fname = dest.format(**kwargs, var=var)
-        fname = pathlib.Path(fname)
-        fname.parent.mkdir(exist_ok=True, parents=True)
-
-        ds[[var]].to_zarr(fname, mode="w", group=kwargs["year"])
