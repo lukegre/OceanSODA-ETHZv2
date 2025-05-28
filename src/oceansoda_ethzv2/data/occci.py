@@ -5,6 +5,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 import xarray as xr
+from loguru import logger
 
 from .utils.core import CoreDataset
 from .utils.date_utils import DateWindows
@@ -100,3 +101,239 @@ class OCCCIDataset(CoreDataset):
         )
 
         return ds
+
+
+#########################
+## Chlorophyll filling ##
+#########################
+
+
+class ChlorophyllFillingSVD:
+    def __init__(
+        self,
+        n_iter: int = 13,
+        n_components: int = 8,
+        clim: Optional[xr.DataArray] = None,
+    ):
+        """
+        Initialize the Chlorophyll Filling SVD class.
+
+        Parameters
+        ----------
+        n_iter : int
+            Number of iterations for the SVD reconstruction.
+        n_components : int
+            Number of principal components to use in the reconstruction.
+        """
+        self.n_iter = n_iter
+        self.n_components = n_components
+        self.clim = clim
+
+    def __call__(self, da: xr.DataArray) -> xr.Dataset:
+        """
+        Fill gaps in the provided DataArray using SVD reconstruction.
+
+        Parameters
+        ----------
+        da : xr.DataArray
+            Input data array with gaps to be filled. It is expected to have a 'time' dimension.
+
+        Returns
+        -------
+        xr.DataArray
+            A new xarray DataArray with missing values filled using SVD reconstruction.
+        """
+        if self.clim is None:
+            raise ValueError("Climatology data must be provided for gap filling.")
+
+        if list(self.clim.sizes) != list(da.sizes):
+            raise ValueError(
+                f"Input data must match climatology size. Input data has "
+                f"shape {da.sizes}, but climatology has shape {self.clim.sizes}"
+            )
+
+        filled = make_chl_filled(
+            chl_year=da,
+            clim=self.clim,
+            dinsvd_kwargs={"n_iter": self.n_iter, "n_components": self.n_components},
+        )
+
+        return filled
+
+
+def svd_reconstruction(
+    arr: np.ndarray,
+    first_guess: float | np.ndarray = 0,
+    n_components: int = 8,
+    n_iter: int = 10,
+    svd_kwargs: dict = dict(n_iter=2),
+) -> tuple[np.ndarray, list]:
+    """
+    Fills gappy data using Singular Value Decomposition (SVD) reconstruction.
+
+    Based on the idea that the principle components can be used to iteratively
+    reconstruct the data with less uncertainty when applied iteratively.
+
+    Parameters
+    ----------
+    arr : np.ndarray [2D]
+        The array to be filled structured as (time, stacked space-coords).
+        The missing values should be NaNs and these will be filled.
+    first_guess : np.ndarray [2D] or float
+        A first guess of the missing values. If a float is provided, all missing
+        values will be filled with this value. If an array is provided, it has to
+        be the same shape as `arr` and will be used as the first guess. An example
+        of a good first guess is the climatology. NaNs in the first guess will be
+        treated as land values and will not be filled in the final output.
+    n_components : int
+        The number of principle components to use in the reconstruction.
+    n_iter : int
+        The number of iterations to perform.
+    svd_kwargs : dict
+        Keyword arguments to pass to the `randomized_svd` function from sklearn.
+    verbosity : bool
+        If True, prints the iteration number and the current error.
+
+    Returns
+    -------
+    filled : np.ndarray [2D]
+        The filled array. If first_guess was provided with NaNs, these values will
+        be filled with NaNs in the final output.
+    """
+    from sklearn.utils.extmath import randomized_svd
+
+    logger.debug(f"SVD reconstruction of Chl-a [{n_iter} iters]")
+    X = np.array(arr)
+    m = np.isnan(X)
+
+    if isinstance(first_guess, (np.ndarray, pd.DataFrame)):
+        land_mask = np.isnan(first_guess)
+        filler = np.nan_to_num(first_guess, nan=0, neginf=0, posinf=0)[m]
+    else:
+        land_mask = None
+        filler = first_guess
+
+    X[m] = filler
+
+    error = []
+    for i in range(n_iter):
+        u, s, v = randomized_svd(X, n_components, **svd_kwargs)
+        out = u @ np.diag(s) @ v
+        X[m] = out[m]
+        error += (np.nansum(abs(X[~m] - out[~m])),)
+        logger.trace(f"{i:02d}: {error[-1]:.2f}")
+
+    filled = X
+    if land_mask is not None:
+        filled[land_mask] = np.nan
+
+    return filled, error
+
+
+def fill_lat_lon_nearest(da: xr.DataArray) -> xr.DataArray:
+    """
+    Fill missing values in an xarray DataArray by propagating the nearest
+    available values along the 'time', 'lat', and 'lon' dimensions.
+    The function performs forward fill (ffill) and backward fill (bfill)
+    operations sequentially along each dimension ('time', 'lat', 'lon')
+    with a limit of 1, ensuring that missing values are filled with the
+    nearest available data.
+    Parameters:
+    -----------
+    da : xr.DataArray
+        The input xarray DataArray containing missing values to be filled.
+    Returns:
+    --------
+    xr.DataArray
+        A new xarray DataArray with missing values filled using the nearest
+        available values along the specified dimensions.
+    """
+    da_filled = (
+        da.ffill(dim="time", limit=1)
+        .bfill(dim="time", limit=1)
+        .ffill(dim="lat", limit=1)
+        .bfill(dim="lat", limit=1)
+        .ffill(dim="lon", limit=1)
+        .bfill(dim="lon", limit=1)
+    )
+
+    return da_filled
+
+
+def fill_gaps_with_clim_dinsvd(
+    da: xr.DataArray, clim: xr.DataArray, n_iter: int = 13, n_components: int = 8
+) -> tuple[xr.DataArray, list]:
+    """
+    Fill gaps in a data array using climatology and a
+    Data Interpolating Singular Value Decomposition (DInSVD)
+
+    Parameters:
+    -----------
+    da : xr.DataArray
+        Input data array with gaps to be filled. It is expected to have a 'time' dimension.
+    clim : xr.DataArray
+        Climatology data array used as the first guess for the gap-filling process.
+        Must have the same shape and coordinates as `da`.
+    n_iter : int, optional
+        Number of iterations for the SVD-based reconstruction. Default is 13.
+    n_components : int, optional
+        Number of principal components to retain during the reconstruction. Default is 8.
+    Returns:
+    --------
+    tuple[xr.DataArray, list]
+        A tuple containing:
+        - `chl_dineof` (xr.DataArray): The gap-filled data array with the same shape and coordinates as `da`.
+        - `dineof_err` (list): A list of reconstruction errors for each iteration.
+    Notes:
+    ------
+    - This function is inspired by the DINEOF approach to iteratively reconstruct missing values in the input data array.
+    - The process may take some time depending on the size of the input data and the number of iterations.
+    """
+
+    logger.debug("CHL gap filling (SVD approach) may take some time")
+    t = da.time.size
+
+    chl_dineof, dineof_err = svd_reconstruction(
+        arr=da.values.reshape(t, -1),
+        first_guess=clim.values.reshape(t, -1),
+        n_iter=n_iter,
+        n_components=n_components,
+    )
+
+    chl_dineof = xr.DataArray(
+        data=chl_dineof.reshape(da.shape), coords=da.coords, dims=da.dims
+    )
+
+    return chl_dineof, dineof_err
+
+
+def make_chl_filled(
+    chl_year: xr.DataArray, clim: xr.DataArray, dinsvd_kwargs: dict[str, int] = {}
+) -> xr.Dataset:
+    from tqdm.dask import TqdmCallback as ProgressBar
+
+    name = chl_year.name
+
+    with ProgressBar():
+        chl_nearest = fill_lat_lon_nearest(chl_year).persist()
+        chl_dineof, _ = fill_gaps_with_clim_dinsvd(
+            chl_nearest, clim=clim, **dinsvd_kwargs
+        )
+
+    chl_filled = chl_year.fillna(chl_nearest).fillna(chl_dineof)
+
+    mask_year = chl_year.notnull()
+    mask_nearest = chl_nearest.notnull()
+    mask_dineof = chl_dineof.notnull()
+
+    chl_flag = (
+        (mask_year * 1)
+        + (mask_nearest & ~mask_year) * 2
+        + (mask_dineof & ~mask_year & ~mask_nearest) * 3
+    )
+
+    ds = xr.merge(
+        [chl_filled.rename(f"{name}_filled"), chl_flag.rename(f"{name}_filled_flag")]
+    )
+
+    return ds

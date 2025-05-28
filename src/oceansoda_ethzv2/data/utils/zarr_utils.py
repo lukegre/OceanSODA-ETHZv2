@@ -1,7 +1,7 @@
 import pathlib
 from abc import ABC, abstractmethod
 from functools import cached_property, lru_cache
-from typing import Literal, Optional, Union, final
+from typing import Callable, Literal, Optional, Union, final
 
 import numpy as np
 import pandas as pd
@@ -358,3 +358,36 @@ def save_vars_to_zarrs(
             progress=progress,
             error_handling=error_handling,
         )
+
+
+def open_zarr_groups(
+    zarr_root, concat_dim="time", group_validator: Callable | None = None
+):
+    """
+    Finds all groups in a Zarr root, opens them, and concatenates them along the specified dimension.
+
+    Parameters:
+        zarr_root (str): Path to the Zarr root directory.
+        concat_dim (str): Dimension along which to concatenate the groups.
+
+    Returns:
+        xarray.Dataset: Concatenated dataset.
+    """
+    import zarr
+
+    # Find all groups in the Zarr root
+    store = zarr.open(zarr_root, mode="r")
+    groups = list(store.group_keys())
+
+    # Open all groups as datasets
+    datasets = []
+    for group in groups:
+        ds = xr.open_zarr(f"{zarr_root}/{group}", consolidated=False)
+        if group_validator is not None:
+            group_validator(ds)
+        datasets.append(ds)
+
+    # Concatenate datasets along the specified dimension
+    concatenated_ds = xr.concat(datasets, dim=concat_dim)
+
+    return concatenated_ds

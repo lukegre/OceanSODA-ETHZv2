@@ -1,3 +1,5 @@
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -288,3 +290,146 @@ class TimestepValidator:
             f"No missing longitude values found along longitude for all variables of the dataset."
         )
         return ds
+
+
+class ZarrYearValidator:
+    """
+    Checks if the year group in a zarr store has the full number of timesteps and
+    matches the expected grid shape.
+    """
+
+    def __init__(
+        self,
+        spatial_res=0.25,
+        time_window="8D",
+        error_handling: Literal["raise", "warn", "ignore"] = "raise",
+    ):
+        from .date_utils import DateWindows
+        from .processors import make_target_global_grid
+
+        self.spatial_res = spatial_res
+        self.time_window = time_window
+        self.target_grid = make_target_global_grid(spatial_res)
+        self.date_windows = DateWindows(window_span=self.time_window)
+        self.error_handling = error_handling
+
+    def __call__(
+        self,
+        ds: xr.Dataset,
+        error_handling: Literal["raise", "warn", "ignore", None] = None,
+    ) -> bool:
+        """
+        Validates the dataset for the year group in a zarr store.
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            The dataset to validate.
+        error_handling : Literal['raise', 'warn', 'ignore', None], optional
+            How to handle errors. If 'raise', raises an error on failure.
+            If 'warn', logs a warning on failure. If 'ignore', logs a trace message on failure.
+            If None, uses the default error handling set in the class.
+
+        Returns
+        -------
+        bool
+            True if the dataset is valid, False otherwise.
+        """
+        return self.is_valid(ds, error_handling=error_handling)
+
+    def is_valid(
+        self,
+        ds: xr.Dataset,
+        error_handling: Literal["raise", "warn", "ignore", None] = None,
+    ) -> bool:
+        """
+        Validates the dataset for the year group in a zarr store.
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            The dataset to validate.
+        error_handling : Literal['raise', 'warn', 'ignore', None], optional
+            How to handle errors. If 'raise', raises an error on failure.
+            If 'warn', logs a warning on failure. If 'ignore', logs a trace message on failure.
+            If None, uses the default error handling set in the class.
+
+        Returns
+        -------
+        xr.Dataset
+            The validated dataset.
+        """
+        checks = [
+            self.is_single_year,
+            self.is_full_year,
+            self.is_correct_shape,
+        ]
+
+        if error_handling is None:
+            error_handling = self.error_handling  # type: ignore #
+
+        results = []
+        for check in checks:
+            success, message = check(ds)
+            # do complex matching, where error_handling must be x and success must be false
+            match error_handling:
+                case "raise" if not success:
+                    raise ValueError(message)
+                case "warn" if not success:
+                    logger.warning(message)
+                    results.append(False)
+                case "ignore" if not success:
+                    logger.trace(message)
+                    results.append(True)
+                case _ if success:
+                    logger.trace(message)
+                    results.append(True)
+                case _:
+                    raise ValueError(
+                        f"Invalid error_handling option: {error_handling}. Must be 'raise', 'warn', or 'ignore'."
+                    )
+
+        return all(results)
+
+    def is_single_year(self, ds: xr.Dataset) -> tuple[bool, str]:
+        year_arr = ds.time.dt.year.values
+        n_years = np.unique(year_arr).size
+        if n_years != 1:
+            return False, f"Dataset contains {n_years} years, expected 1 year."
+        else:
+            return True, f"Dataset contains {n_years} year, as expected."
+
+    def is_full_year(self, ds: xr.Dataset) -> tuple[bool, str]:
+        year = int(ds.time.dt.year.values[0])
+
+        n_expected = self.date_windows.get_bin_centers(year).size
+        n_actual = ds.sizes["time"]
+
+        if n_actual != n_expected:
+            return (
+                False,
+                f"Dataset contains {n_actual} timesteps, expected {n_expected} for year {year}.",
+            )
+        else:
+            return (
+                True,
+                f"Dataset contains {n_actual} timesteps, as expected for year {year}.",
+            )
+
+    def is_correct_shape(self, ds: xr.Dataset) -> tuple[bool, str]:
+        lon = ds["lon"].values
+        lat = ds["lat"].values
+
+        target_lon = self.target_grid.lon
+        target_lat = self.target_grid.lat
+
+        if lon.shape != target_lon.shape or lat.shape != target_lat.shape:
+            return (
+                False,
+                f"Dataset shape does not match expected shape. Expected {target_lon.shape}x{target_lat.shape}, got {lon.shape}x{lat.shape}.",
+            )
+        else:
+            return (
+                True,
+                f"Dataset shape matches expected shape: {lon.shape}x{lat.shape}.",
+            )
