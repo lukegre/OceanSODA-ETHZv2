@@ -58,6 +58,8 @@ def preprocessor_generic(
     if depth_idx is not None:
         ds = ds.isel(depth=depth_idx, drop=True)
 
+    ds = squeeze_unwanted(ds, keep_dims=("time", "lat", "lon"))
+
     sizes = {}
     for coord in coords_duplicate_check:
         ds[coord] = ds[coord].round(3)
@@ -70,6 +72,30 @@ def preprocessor_generic(
 
     for coord in ["lon", "lat"]:
         ds = sort_coord(ds, coord)
+
+    return ds
+
+
+def squeeze_unwanted(ds: xr.Dataset, keep_dims=("time", "lat", "lon")):
+    """
+    Squeeze the dataset by removing dimensions that have a size of 1,
+    except for specified dimensions to keep.
+
+    Parameters:
+        ds (xr.Dataset): The input dataset to squeeze.
+        keep_dims (tuple): Dimensions to keep in the dataset.
+
+    Returns:
+        xr.Dataset: The squeezed dataset.
+    """
+    # Create a list of dimensions to drop
+    drop_dims = [dim for dim in ds.dims if dim not in keep_dims and ds[dim].size == 1]
+
+    for dim in drop_dims:
+        ds = ds.isel(**{dim: 0}, drop=True) if dim in drop_dims else ds
+
+    # Assign an attribute indicating that the dataset has been squeezed
+    ds = ds.assign_attrs(processing_squeezed_dims=str(drop_dims))
 
     return ds
 

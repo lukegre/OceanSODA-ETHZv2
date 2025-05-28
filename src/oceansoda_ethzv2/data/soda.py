@@ -126,8 +126,8 @@ class SODADataset(CoreDataset):
         ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
         ds = preprocessor_generic(
             ds,
-            vars_rename=self.vars,
             depth_idx=0,
+            vars_rename=self.vars,
             coords_duplicate_check=["lat", "lon"],
         )
 

@@ -25,6 +25,15 @@ ceda:
       sss: sss_cci
       sss_random_error: sss_cci_sigma_uncert
 
+  sst_noaa:
+    source_path: 'https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/{time:%Y%m}/oisst-avhrr-v02r01.{time:%Y%m%d}.nc'
+    time_start: '1982-01-01'
+    time_end: null
+    vars:
+      sst: sst_noaa
+      err: sst_noaa_sigma_uncert
+      ice: ice_noaa
+
 ftp:
   occci:
     source_path: ftp://oceancolour.org/occci-v6.0/geographic/netcdf/8day/chlor_a/{time:%Y}/ESACCI-OC-L3S-CHLOR_A-MERGED-8D_DAILY_4km_GEO_PML_OCx-{time:%Y%m%d}-fv6.0.nc

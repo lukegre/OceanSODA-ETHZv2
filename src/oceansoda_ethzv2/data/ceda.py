@@ -10,7 +10,7 @@ from .utils.core import CoreDataset
 from .utils.date_utils import DateWindows
 
 
-class CEDADataset(CoreDataset):
+class HTTPDailyDataset(CoreDataset):
     checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
     def __init__(

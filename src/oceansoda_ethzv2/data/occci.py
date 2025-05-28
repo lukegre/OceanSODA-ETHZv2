@@ -97,7 +97,7 @@ class OCCCIDataset(CoreDataset):
 
         ds = xr.open_dataset(fname, chunks={}, decode_timedelta=False)
         ds = preprocessor_generic(
-            ds=ds, vars_rename=self.vars, depth_idx=None, coords_duplicate_check=[]
+            ds=ds, vars_rename=self.vars, coords_duplicate_check=[]
         )
 
         return ds

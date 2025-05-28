@@ -1,0 +1,30 @@
+features:
+# observed features - will be converted to anomalies
+- sst_cci_noaa
+- chl_occci_filled
+- sss_stacked
+- mld_soda
+- ssh_duacs
+- ice_cci_noaa
+# delta is t - (t-1)
+- delta_sst
+- delta_chl
+- delta_sss
+- delta_ssh
+- delta_mld
+- delta_ice
+# from here on, all features are the same for REP and NRT
+# climatological features
+- clim_sst
+- clim_chl
+- clim_sst
+- clim_sss
+- clim_mld
+- clim_ssh
+# seas features
+- seas_sst
+- seas_chl
+- seas_sss
+- seas_mld
+- seas_ssh
+- seas_ice
