@@ -77,7 +77,9 @@ class CoreDataset(ABC):
             year=year, index=index, time=time, handling=file_exists_handling
         )
 
-        local_source = get_path_protocol(self.sourece_path) == "file"
+        protocol = get_path_protocol(self.sourece_path)
+        logger.trace("Dataset source protocol: {}", protocol)
+        local_source = protocol == "file"
 
         if local_source:
             ds = self._get_unprocessed_timestep_local(year=year, index=index, time=time)
@@ -443,5 +445,7 @@ def get_path_protocol(path: str):
     """
     if "://" in path:
         return path.split("://")[0]
+    elif "/" not in path:
+        return "cmems_id"
     else:
         return "file"

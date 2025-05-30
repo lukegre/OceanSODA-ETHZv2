@@ -4,7 +4,7 @@ import xarray as xr
 
 
 def smooth_seas_cycle(
-    da: xr.DataArray, dim="dayofyear", window=3, iters=1, func="mean"
+    da: xr.DataArray | xr.Dataset, dim="dayofyear", window=3, iters=1, func="mean"
 ) -> xr.DataArray:
     """
     Smooth a seasonal cycle in an xarray DataArray by applying a moving window

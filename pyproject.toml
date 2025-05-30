@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.11.18",
+    "bottleneck>=1.5.0",
     "copernicusmarine>=2.1.1",
     "frozendict>=2.4.6",
     "gcsfs>=2025.5.1",
@@ -20,6 +21,7 @@ dependencies = [
     "munch>=4.0.0",
     "netcdf4>=1.7.2",
     "pooch>=1.8.2",
+    "pyseaflux>=2.2.1",
     "pytest>=8.3.5",
     "python-dotenv>=1.1.0",
     "requests>=2.32.3",

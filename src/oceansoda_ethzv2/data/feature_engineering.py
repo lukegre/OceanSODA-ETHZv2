@@ -1,6 +1,7 @@
 import xarray as xr
 
 from . import open_zarr_groups
+from .occci import ChlorophyllFillingSVD
 from .utils import ZarrYearValidator
 
 

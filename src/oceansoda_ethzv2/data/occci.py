@@ -111,9 +111,9 @@ class OCCCIDataset(CoreDataset):
 class ChlorophyllFillingSVD:
     def __init__(
         self,
+        clim: xr.DataArray,
         n_iter: int = 13,
         n_components: int = 8,
-        clim: Optional[xr.DataArray] = None,
     ):
         """
         Initialize the Chlorophyll Filling SVD class.
@@ -127,6 +127,8 @@ class ChlorophyllFillingSVD:
         """
         self.n_iter = n_iter
         self.n_components = n_components
+        if self._is_chl_log10(clim):
+            raise ValueError("CHL climatology data must be in log10 scale.")
         self.clim = clim
 
     def __call__(self, da: xr.DataArray) -> xr.Dataset:
@@ -146,19 +148,57 @@ class ChlorophyllFillingSVD:
         if self.clim is None:
             raise ValueError("Climatology data must be provided for gap filling.")
 
-        if list(self.clim.sizes) != list(da.sizes):
+        if self.clim.shape != da.shape:
             raise ValueError(
                 f"Input data must match climatology size. Input data has "
                 f"shape {da.sizes}, but climatology has shape {self.clim.sizes}"
             )
 
-        filled = make_chl_filled(
+        if not self._is_chl_log10(da):
+            raise ValueError(
+                "Input data must be in log10 scale. Convert with self.convert_log10"
+            )
+
+        return make_chl_filled(
             chl_year=da,
             clim=self.clim,
             dinsvd_kwargs={"n_iter": self.n_iter, "n_components": self.n_components},
         )
 
-        return filled
+    @staticmethod
+    def _is_chl_log10(da: xr.DataArray) -> bool:
+        result = (da.min() < -0.1) & (da.max() < 10)
+        return np.array(result).item()
+
+    def convert_log10(self, da: xr.DataArray) -> xr.DataArray:
+        """
+        Convert the data to log10 scale if it is not already in that scale.
+
+        Parameters
+        ----------
+        da : xr.DataArray
+            Input data array to be converted.
+
+        Returns
+        -------
+        xr.DataArray
+            Data array in log10 scale.
+        """
+        if self._is_chl_log10(da):
+            return da
+        elif da.min() < 0:
+            raise ValueError(
+                "Input data contains negative values, cannot convert to log10 scale."
+            )
+        else:
+            name = da.name
+            units = da.attrs.get("units", "unknown")
+            return (
+                da.clip(min=5e-3)
+                .pipe(np.log10)
+                .reanme(f"{name}_log10")  # type: ignore
+                .assign_attrs(units=f"log10({units})", processing_log10=True)
+            )
 
 
 def svd_reconstruction(

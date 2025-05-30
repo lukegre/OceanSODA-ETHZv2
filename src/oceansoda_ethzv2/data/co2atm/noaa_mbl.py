@@ -159,7 +159,7 @@ def regress_seasonal_resid(
     # and the intercept
     b = y.mean(dim=dim) - m * x.mean(dim=dim)
     # doing prediction
-    yhat = (m * x) + b
+    yhat = xr.DataArray((m * x) + b)
     yhat = yhat.transpose(dim, ...)
 
     # computing the seasonal cycle of the residuals
@@ -168,11 +168,11 @@ def regress_seasonal_resid(
     resid_seasonal = smooth_seas_cycle(resid_seasonal)
 
     # add the seasonal cycle from the residuals to the predictions
-    yhat_seasonal = yhat.groupby(season_agg_dim) + resid_seasonal
+    yhat_seasonal = xr.DataArray(yhat.groupby(season_agg_dim) + resid_seasonal)
 
     # compute some metrics for the comparison
     attrs = dict(
-        description=f"Regression of `{x.name}` against `{y.name}` with seasonal cycle added",
+        description=f"Regression of `{x.name}` against `{y.name}` with seasonal cycle added - only regressed data and no original data",
         r2_excl_seas_resid=np.around(r2_score(y, yhat), 3),
         r2_incl_seas_resid=np.around(r2_score(y, yhat_seasonal), 3),
     )
