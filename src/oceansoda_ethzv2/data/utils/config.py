@@ -49,7 +49,6 @@ def get_dotenv_fname(name: str = ".env", relative: bool = True) -> Optional[str]
 
     fpath = dotenv.find_dotenv(name)
     fpath = pathlib.Path(fpath)
-    fpath = fpath.relative_to(pathlib.Path.cwd(), walk_up=True) if fpath else None
 
     if fpath and fpath.exists():
         return str(fpath)

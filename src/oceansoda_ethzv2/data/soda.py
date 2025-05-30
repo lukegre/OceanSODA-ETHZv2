@@ -99,10 +99,23 @@ class SODADataset(CoreDataset):
     ) -> xr.Dataset:
         from .utils.download import make_paths_from_dates
 
+        logger.debug(f"Getting local SODA data at: {self.source_path}")
+
         time = self.date_windows.get_window_center(time=time, year=year, index=index)
         dates = make_dates_for_extended_window(time=time, window_span=self.window_span)
         paths = make_paths_from_dates(dates, string_template=self.source_path)
+
+        logger.trace(
+            "Created paths for SODA that still need to be checked: \n{}",
+            "\n".join(paths),
+        )
         paths = tuple([str(path) for path in paths if pathlib.Path(path).exists()])
+
+        if not paths:
+            raise FileNotFoundError(
+                f"No local SODA files found for {time} in {self.source_path}. "
+                "Please check the source path or download the files."
+            )
 
         ds_list = [self._opener(path) for path in paths]
         ds = xr.concat(ds_list, dim="time").assign_attrs(requested_time=time)

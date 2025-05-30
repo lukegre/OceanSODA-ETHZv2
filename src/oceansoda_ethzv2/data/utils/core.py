@@ -17,10 +17,11 @@ class CoreDataset(ABC):
         "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr"
     )
     checks: tuple[str, ...] = ()
-    local_source: bool = False
     sourece_path: str = ""
     vars: dict[str, str] = {}
     _dim_names: set = {"time", "lat", "lon", "depth"}
+    time_start: Optional[pd.Timestamp | str] = None
+    time_end: Optional[pd.Timestamp | str] = None
 
     @final
     def __getitem__(self, key: tuple[int, int]) -> xr.Dataset:
@@ -76,7 +77,9 @@ class CoreDataset(ABC):
             year=year, index=index, time=time, handling=file_exists_handling
         )
 
-        if self.local_source:
+        local_source = get_path_protocol(self.sourece_path) == "file"
+
+        if local_source:
             ds = self._get_unprocessed_timestep_local(year=year, index=index, time=time)
         else:
             ds = self._get_unprocessed_timestep_remote(
@@ -131,6 +134,50 @@ class CoreDataset(ABC):
         ds = self._regrid_data(ds)
 
         return ds
+
+    @final
+    def _is_in_bounds(
+        self,
+        year: Optional[int] = None,
+        index: Optional[int] = None,
+        time: Optional[pd.Timestamp | str] = None,
+    ) -> bool:
+        # TODO: make sure that types work
+        """Check if the given year, index, or time is within the bounds of the dataset.
+        Uses `self.time_start` and `self.time_end` to determine the bounds.
+        """
+
+        time_start = pd.Timestamp(self.time_start) if self.time_start else None
+        time_end = pd.Timestamp(self.time_end) if self.time_end else None
+
+        if time_start is None:
+            logger.warning(
+                "Cannot check if dataset is in bounds, no time_start provided"
+            )
+        elif time_start is None and time_end is None:
+            logger.warning(
+                "Cannot check if dataset is in bounds, no time_start or time_end provided"
+            )
+        elif time_end is None:
+            time_end = pd.Timestamp.now() - pd.DateOffset(days=8)
+        else:
+            raise ValueError(
+                "Both time_start and time_end are None, cannot check if dataset is in bounds"
+            )
+
+        t0, t1 = self.date_windows.get_window_edges(time, year, index)
+        if t0 < time_start:
+            logger.warning(
+                f"Requested time {t0} is before the dataset start time {time_start}"
+            )
+            return False
+        if t1 > time_end:
+            logger.warning(
+                f"Requested time {t1} is after the dataset end time {time_end}"
+            )
+            return False
+
+        return True
 
     @abstractmethod
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset:
@@ -302,8 +349,9 @@ class CoreDataset(ABC):
     ) -> tuple[bool, str]:
         from .zarr_utils import is_time_safe_for_zarr
 
-        year, index = self.date_windows.get_index(year=year, index=index, time=time)
-        sname = str(pathlib.Path(self._get_save_path(var)) / str(year))
+        # can't overwrite year, index else raises error in get_window_center
+        year_, _ = self.date_windows.get_index(year=year, index=index, time=time)
+        sname = str(pathlib.Path(self._get_save_path(var)) / str(year_))
 
         time = self.date_windows.get_window_center(year=year, index=index, time=time)
 
@@ -356,7 +404,9 @@ class CoreDataset(ABC):
         write_safe = ()
         message = ""
         for key in vars:
-            safe, message = self._is_var_timestep_write_safe(key, year, index, time)
+            safe, message = self._is_var_timestep_write_safe(
+                var=key, year=year, index=index, time=time
+            )
             write_safe += (safe,)
 
         if not all(write_safe):
@@ -375,3 +425,23 @@ class CoreDataset(ABC):
                     )
         else:
             return True
+
+
+def get_path_protocol(path: str):
+    """
+    Get the protocol of a path.
+
+    Parameters
+    ----------
+    path : str
+        The path to get the protocol for.
+
+    Returns
+    -------
+    str
+        The protocol of the path.
+    """
+    if "://" in path:
+        return path.split("://")[0]
+    else:
+        return "file"
