@@ -136,7 +136,7 @@ def lon_180W_180E(ds, lon_name="lon"):
     return ds
 
 
-def make_target_global_grid(res, lon_0_360=False) -> munch.Munch:
+def make_target_grid_global(res, lon_0_360=False) -> munch.Munch:
     half = res / 2
 
     if lon_0_360:
@@ -150,6 +150,26 @@ def make_target_global_grid(res, lon_0_360=False) -> munch.Munch:
     y1 = 90
 
     da = munch.Munch(lat=np.arange(y0, y1, res), lon=np.arange(x0, x1, res))
+    return da
+
+
+def make_target_grid_edges_global(res, lon_0_360=False) -> munch.Munch:
+    half = res / 2
+
+    if lon_0_360:
+        x0 = 0
+        x1 = 360
+    else:
+        x0 = -180
+        x1 = 180
+
+    y0 = -90
+    y1 = 90
+
+    da = munch.Munch(
+        lat=np.arange(y0, y1 + half, res), lon=np.arange(x0, x1 + half, res)
+    )
+
     return da
 
 
@@ -179,7 +199,7 @@ def coarsen_then_interp(ds, spatial_res=0.25, window_size: str = "8D"):
 
     # make target grid if not provided
     target_temporal = get_timesteps_per_window(ds, window_size=window_size)
-    target_spatial = make_target_global_grid(spatial_res)
+    target_spatial = make_target_grid_global(spatial_res)
     target = target_spatial | {"time": target_temporal}
 
     # coarsening to match target grid resolution
@@ -239,3 +259,22 @@ def coarsen_toward_target_grid(
     )
 
     return out
+
+
+def fill_lon_gap(da: xr.DataArray) -> xr.DataArray:
+    n_lon = da.lon.size // 2
+    missing_lons = da.count("lat").isel(time=0) == 0
+    n_missing = np.array(missing_lons.sum()).item()
+    filler = (
+        da.compute()
+        .roll(lon=n_lon)
+        .interpolate_na(dim="lon", method="linear")
+        .roll(lon=-n_lon)
+        .where(missing_lons)
+    )
+    da = da.where(~missing_lons, filler)
+    da = da.assign_attrs(
+        processing_filled_lon_gap_method="linear interpolation",
+        processing_filled_lon_gap_n_missing=n_missing,
+    )
+    return da

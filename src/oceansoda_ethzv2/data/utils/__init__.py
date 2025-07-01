@@ -10,7 +10,7 @@ from .download import (
 from .processors import (
     coarsen_then_interp,
     lon_180W_180E,
-    make_target_global_grid,
+    make_target_grid_global,
     rename_and_drop,
 )
 from .zarr_utils import (
@@ -29,7 +29,7 @@ __all__ = [
     "get_urls_that_exist",
     "parmap_func",
     "lon_180W_180E",
-    "make_target_global_grid",
+    "make_target_grid_global",
     "coarsen_then_interp",
     "rename_and_drop",
     "open_zarr_groups",

@@ -360,6 +360,43 @@ def save_vars_to_zarrs(
         )
 
 
+def save_vars_to_zarr_year(
+    ds: xr.Dataset,
+    fname_fmt: str,
+    progress=False,
+    window_span="8D",
+    overwrite_group: bool = False,
+    error_handling: Literal["raise", "warn", "ignore"] = "raise",
+):
+    from .checker import ZarrYearValidator
+
+    if progress:
+        from tqdm.dask import TqdmCallback as ProgressBar
+    else:
+        from .download import DummyProgress as ProgressBar
+
+    assert "{var}" in fname_fmt, "`fname_fmt` must contain a {var} placeholder"
+
+    validator = ZarrYearValidator(
+        error_handling=error_handling, time_window=window_span
+    )
+
+    with ProgressBar(desc="Validating dataset"):
+        ds = ds.chunk({"time": 1, "lat": 360, "lon": 360}).persist()
+        validator(ds, error_handling=error_handling)
+
+    year = np.unique(ds.time.dt.year)[0]
+
+    for var in ds.data_vars:
+        with ProgressBar(desc=f"Saving {var} for year {year}"):
+            fname = fname_fmt.format(var=var)
+            ds.to_zarr(
+                store=fname,
+                mode="w" if overwrite_group else "w-",  # will fail if the group exists
+                group=str(year),
+            )
+
+
 def open_zarr_groups(
     zarr_root, concat_dim="time", group_validator: Callable | None = None
 ):

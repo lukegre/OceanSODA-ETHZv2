@@ -13,3 +13,6 @@ wheels/
 .vscode/settings.json
 *.nc
 *.zarr
+
+data/
+notebooks/dataset_download.log

@@ -59,7 +59,7 @@ class ERA5Dataset(ZarrDataset):
         return ds_sub
 
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset:
-        from .utils.processors import standard_regridding
+        from .utils.processors import fill_lon_gap, standard_regridding
 
         if "u10_era5" in ds and "v10_era5" in ds:
             wind_moments = calc_wind_moments(ds)
@@ -67,7 +67,7 @@ class ERA5Dataset(ZarrDataset):
 
         ds = standard_regridding(
             ds_in=ds, spatial_res=self.spatial_res, window_size=self.temporal_res
-        )
+        ).map(fill_lon_gap)
 
         if "u10_era5" in ds and "v10_era5" in ds:
             ds["wind_speed"] = np.sqrt(ds["wind_2nd_moment_era5"])

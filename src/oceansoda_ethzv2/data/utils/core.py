@@ -6,8 +6,63 @@ from typing import Literal, Optional, final
 import pandas as pd
 import xarray as xr
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from .date_utils import DateWindows
+
+RECENT_TIMESTEP = (pd.Timestamp.now() - pd.DateOffset(days=8)).strftime("%Y-%m-%d")
+
+
+class DataEntry(BaseModel):
+    source: str = Field(
+        ...,
+        description="Source of the dataset, that can be a URL with placeholders for {time, version, window_span, spatial_res}, or a CMEMS dataset ID. ",
+    )
+    product: str = Field(..., description="Product name of the dataset, e.g. 'ostia'.")
+    vars: dict[str, str] = Field(
+        {},
+        description="Variables to rename in the dataset, e.g. {'CHL_mean': 'chl_occci'}",
+    )
+    time_start: str = Field(
+        "1982-01-01",
+        description="Start time of the dataset. Defaults to 1982-01-01. If provided, will not try to download before this time, instead raise FileNotFoundError if no data is available.",
+    )
+    time_end: str = Field(
+        RECENT_TIMESTEP,
+        description="End time of the dataset. Defaults to 8 days ago. If provided, will not try to download after this time, instead raise FileNotFoundError if no data is available.",
+    )
+    flag: int | None = Field(
+        None,
+        description="Flag to indicate the dataset label, useful if multiple entries in a dataset. ",
+    )
+    kwargs: dict[str, str] = Field(
+        {},
+        description="Additional keyword arguments. Passed to `source` for string formatting and offers extensibility for more advanced use cases (e.g., fsspec_kwargs for remote datasets).",
+    )
+    checks: tuple[str, ...] = Field(
+        ("fix_timestep", "add_time_bnds", "check_lon_lat"),
+        description="Checks to perform on the dataset. Defaults to ('fix_timestep', 'add_time_bnds', 'check_lon_lat').",
+    )
+
+
+class DataSet(BaseModel):
+    datasets: list[DataEntry] = Field(
+        ...,
+        description="List of datasets to be used in the DataSet. Each dataset is defined by a DataEntry object.",
+    )
+    save_path: str = Field(
+        "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr",
+        description="Path to save the dataset, can contain placeholders for {window_span, spatial_res, {var}}.",
+    )
+    spatial_res: float = Field(
+        0.25,
+        description="Spatial resolution in degrees, e.g. 0.25 for 0.25 degrees.",
+        ge=0.005,
+        le=5.0,
+    )
+    window_span: str = Field(
+        "8D", description="Temporal resolution of the dataset, e.g. '8D' for 8 days."
+    )
 
 
 class CoreDataset(ABC):
@@ -17,11 +72,35 @@ class CoreDataset(ABC):
         "../data/{window_span}_{spatial_res}/{{var}}-{window_span}_{spatial_res}.zarr"
     )
     checks: tuple[str, ...] = ()
-    sourece_path: str = ""
+    source_path: str = ""
     vars: dict[str, str] = {}
     _dim_names: set = {"time", "lat", "lon", "depth"}
-    time_start: Optional[pd.Timestamp | str] = None
-    time_end: Optional[pd.Timestamp | str] = None
+    time_start: Optional[str] = None
+    time_end: Optional[str] = None
+
+    def _other_repr(self) -> tuple[str, ...]:
+        """
+        Additional representation for the dataset.
+        This method should be implemented by subclasses to provide additional information.
+        """
+        return ()
+
+    @final
+    def __repr__(self):
+        repr = (
+            f"{self.__class__.__name__}(",
+            f"spatial_res={self.spatial_res}, ",
+            f"window_span='{self.window_span}', ",
+            f"save_path='{self.save_path}', ",
+            f"source_path='{self.source_path}', ",
+            f"time_start={self.time_start}, ",
+            f"time_end={self.time_end}, ",
+            f"vars={self.vars}, ",
+            f"checks={self.checks}",
+        )
+        repr += self._other_repr()
+        repr += (")",)
+        return "\n    ".join(repr)
 
     @final
     def __getitem__(self, key: tuple[int, int]) -> xr.Dataset:
@@ -50,6 +129,7 @@ class CoreDataset(ABC):
         """
         return DateWindows(window_span=self.window_span)
 
+    @abstractmethod
     def _get_unprocessed_timestep_local(
         self,
         year: Optional[int] = None,
@@ -71,22 +151,65 @@ class CoreDataset(ABC):
         year: Optional[int] = None,
         index: Optional[int] = None,
         time: Optional[pd.Timestamp | str] = None,
-        file_exists_handling: Literal["raise", "warn", "ignore"] = "warn",
+        error_handling: Literal["raise", "warn", "ignore"] = "warn",
     ) -> xr.Dataset:
-        self.is_timestep_write_safe(
-            year=year, index=index, time=time, handling=file_exists_handling
+        """
+        Get a time stride from the dataset without regridding it.
+        This means that the data is returned in its original form,
+        unless the function self._opoener does some preprocessing.
+
+        Parameters
+        ----------
+        year : int, optional
+            The year to get the data for.
+        index : int, optional
+            The index of the data to get.
+        time : pd.Timestamp or str, optional
+            The time to get the data for.
+        error_handling : Literal['raise', 'warn', 'ignore'], optional
+            How to handle errors when the requested timestep is out of bounds.
+            'raise' will raise an error, 'warn' will log a warning, and 'ignore'
+            will log a debug message.  Defaults to 'warn' so that data can always
+            be retrieved, but the user is informed of the issue.
+
+        Returns
+        -------
+        xr.Dataset
+            The unprocessed dataset for the specified timestep.
+
+        Raises
+        ------
+        ValueError
+            1. if the (year+index) or (time) is not provided
+            2. if the requested timestep is out of bounds
+        FileNotFoundError
+            1. when no files were found for the requested timestep and
+               `error_handling` is set to "raise".
+        """
+
+        in_bounds, message = self._is_in_bounds(year, index, time)
+        if not in_bounds:
+            if error_handling == "ignore":
+                logger.debug(message)
+            elif error_handling == "warn":
+                logger.warning(message)
+            else:
+                raise ValueError(message)
+            return xr.Dataset()  # return empty dataset if out of bounds
+
+        protocol = get_path_protocol(self.source_path)
+        local_source = protocol == "file"
+        getter_func = (
+            self._get_unprocessed_timestep_local
+            if local_source
+            else self._get_unprocessed_timestep_remote
         )
 
-        protocol = get_path_protocol(self.sourece_path)
-        logger.trace("Dataset source protocol: {}", protocol)
-        local_source = protocol == "file"
+        logger.debug(
+            f"Dataset source {protocol=}, using function self.{getter_func.__name__} to get timestep"
+        )
 
-        if local_source:
-            ds = self._get_unprocessed_timestep_local(year=year, index=index, time=time)
-        else:
-            ds = self._get_unprocessed_timestep_remote(
-                year=year, index=index, time=time
-            )
+        ds = getter_func(year=year, index=index, time=time)
 
         return ds
 
@@ -123,15 +246,19 @@ class CoreDataset(ABC):
         Raises
         ------
         ValueError
-            If the (year+index) or (time) is not provided.
+            If the (year+index) or (time) is not provided, OR
+            if the requested timestep is out of bounds, OR
+            no data was found for the requested timestep
+        FileNotFoundError
+            If no files were found for the requested timestep
         FileExistsError
-            If the timestep is already stored.
+            If the timestep is already stored and `file_exists_handling` is set to "raise".
         """
 
         self.is_timestep_write_safe(year, index, time, handling=file_exists_handling)
 
         ds = self.get_timestep_unprocessed(
-            year=year, index=index, time=time, file_exists_handling="ignore"
+            year=year, index=index, time=time, error_handling="raise"
         )
         ds = self._regrid_data(ds)
 
@@ -143,43 +270,46 @@ class CoreDataset(ABC):
         year: Optional[int] = None,
         index: Optional[int] = None,
         time: Optional[pd.Timestamp | str] = None,
-    ) -> bool:
-        # TODO: make sure that types work
+    ) -> tuple[bool, str]:
         """Check if the given year, index, or time is within the bounds of the dataset.
         Uses `self.time_start` and `self.time_end` to determine the bounds.
         """
 
-        time_start = pd.Timestamp(self.time_start) if self.time_start else None
-        time_end = pd.Timestamp(self.time_end) if self.time_end else None
-
-        if time_start is None:
-            logger.warning(
-                "Cannot check if dataset is in bounds, no time_start provided"
-            )
-        elif time_start is None and time_end is None:
-            logger.warning(
-                "Cannot check if dataset is in bounds, no time_start or time_end provided"
-            )
-        elif time_end is None:
-            time_end = pd.Timestamp.now() - pd.DateOffset(days=8)
-        else:
-            raise ValueError(
-                "Both time_start and time_end are None, cannot check if dataset is in bounds"
-            )
-
         t0, t1 = self.date_windows.get_window_edges(time, year, index)
-        if t0 < time_start:
-            logger.warning(
-                f"Requested time {t0} is before the dataset start time {time_start}"
-            )
-            return False
-        if t1 > time_end:
-            logger.warning(
-                f"Requested time {t1} is after the dataset end time {time_end}"
-            )
-            return False
+        time = self.date_windows.get_window_center(year=year, index=index, time=time)
+        time_end = self.time_end
+        time_start = self.time_start
 
-        return True
+        # if time start and time end are not defined, use default values
+        if time_start is None:
+            logger.debug(
+                "Dataset does not have a time_start defined - setting to 1970-01-01."
+            )
+            time_start = pd.Timestamp("1970-01-01")
+        elif isinstance(time_start, str):
+            time_start = pd.Timestamp(time_start)
+
+        if time_end is None:
+            time_end = pd.Timestamp.now() - pd.DateOffset(days=8)
+            logger.debug(
+                f"Dataset does not have a time_end defined - setting to {time_end}."
+            )
+        elif isinstance(time_end, str):
+            time_end = pd.Timestamp(time_end)
+
+        if t0 < time_start:
+            in_bounds = False
+            message = (
+                f"Requested time {time} is before the dataset start time {time_start}"
+            )
+        elif t1 > time_end:
+            in_bounds = False
+            message = f"Requested time {time} is after the dataset end time {time_end}"
+        else:
+            message = f"Dataset is within bounds ({time_start} - {time_end})"
+            in_bounds = True
+
+        return in_bounds, message
 
     @abstractmethod
     def _regrid_data(self, ds: xr.Dataset) -> xr.Dataset:

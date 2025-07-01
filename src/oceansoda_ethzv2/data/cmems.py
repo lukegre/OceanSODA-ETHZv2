@@ -50,6 +50,17 @@ class CMEMSEntry(BaseModel):
 class CMEMSDataset(ZarrDataset):
     checks = ("fix_timestep", "add_time_bnds", "check_lon_lat")
 
+    def _other_repr(self) -> tuple[str, ...]:
+        from copy import deepcopy
+
+        repr_lines = ()
+        for entry in self.entries:
+            entry_copy = deepcopy(entry)
+            key = entry_copy.pop("id", "")
+            values = str(entry_copy)
+            repr_lines += (f"{key}={values}",)
+        return repr_lines
+
     @lru_cache(maxsize=1)
     def _open_full_dataset(self) -> xr.Dataset:
         """

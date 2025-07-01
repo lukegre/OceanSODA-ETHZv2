@@ -7,6 +7,7 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
+from .http import HTTPEntry
 from .utils.core import CoreDataset
 
 
@@ -42,6 +43,18 @@ class SODADataset(CoreDataset):
             window_span=window_span,
             spatial_res=f"{str(spatial_res).replace('.', '')}",
         )
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    @classmethod
+    def from_dict(cls, kwargs: dict) -> "SODADataset":
+        """
+        Create an instance of SODADataset from a dictionary of parameters.
+        """
+        entry = HTTPEntry(**kwargs)
+        logger.debug("SODA inputs are valid: {}", entry.model_dump(exclude_none=False))
+
+        return cls(**entry.model_dump(exclude_none=True))
 
     def _get_unprocessed_timestep_remote(
         self,
@@ -80,10 +93,15 @@ class SODADataset(CoreDataset):
         urls = make_paths_from_dates(dates, string_template=self.source_path)
         urls = get_urls_that_exist(urls)
 
-        logger.debug(
-            f"Found {len(urls)} valid URLs over a {len(dates)} day window to"
-            f" be clipped down to {self.window_span}"
-        )
+        if len(urls) == 0:
+            raise FileNotFoundError(
+                f"No valid URLs found for the given dates: {dates}. "
+                "Please check the source path and the date range."
+            )
+        else:
+            logger.debug(
+                f"Found the following URLs for SODA data: {urls}",
+            )
 
         ds_list = data_url_data_in_parallel(urls, self._remote_netcdf_reader)
         ds = xr.concat(ds_list, dim="time")
@@ -97,6 +115,27 @@ class SODADataset(CoreDataset):
         index: int | None = None,
         time: Optional[pd.Timestamp | str] = None,
     ) -> xr.Dataset:
+        """
+        Get a time stride from the local SODA dataset without regridding.
+        Parameters
+        ----------
+        year : int, optional
+            The year to get the data for.
+        index : int, optional
+            The index of the data to get.
+        time : pd.Timestamp or str, optional
+            The time to get the data for.
+
+        Returns
+        -------
+        xr.Dataset
+            The dataset for the specified year and index.
+
+        Raises
+        ------
+        FileNotFoundError
+            If no local SODA files are found for the specified time.
+        """
         from .utils.download import make_paths_from_dates
 
         logger.debug(f"Getting local SODA data at: {self.source_path}")
@@ -105,16 +144,16 @@ class SODADataset(CoreDataset):
         dates = make_dates_for_extended_window(time=time, window_span=self.window_span)
         paths = make_paths_from_dates(dates, string_template=self.source_path)
 
-        logger.trace(
-            "Created paths for SODA that still need to be checked: \n{}",
-            "\n".join(paths),
-        )
         paths = tuple([str(path) for path in paths if pathlib.Path(path).exists()])
 
         if not paths:
             raise FileNotFoundError(
                 f"No local SODA files found for {time} in {self.source_path}. "
                 "Please check the source path or download the files."
+            )
+        else:
+            logger.trace(
+                f"Found the following paths for local SODA files: {paths}",
             )
 
         ds_list = [self._opener(path) for path in paths]
@@ -147,12 +186,12 @@ class SODADataset(CoreDataset):
         return ds
 
     def _regrid_data(self, ds) -> xr.Dataset:
-        from .utils.processors import make_target_global_grid
+        from .utils.processors import make_target_grid_global
 
         time = ds.attrs.pop("requested_time")
         t0, t1 = self.date_windows.get_window_edges(time=time)
 
-        target_grid = make_target_global_grid(self.spatial_res)
+        target_grid = make_target_grid_global(self.spatial_res)
 
         out = (
             ds.resample(time="1D")

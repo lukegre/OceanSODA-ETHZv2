@@ -15,7 +15,12 @@ def read_dataset_config(
         text = file.read()
 
     # parse jinja2 placeholders
-    fname_dotenv = get_dotenv_fname()
+    fname_dotenv = dotenv.find_dotenv(".env")
+    if fname_dotenv == "":
+        raise FileNotFoundError(
+            "No .env file with USERNAMES and PASSWORDs found "
+            "in the current directory or its parents."
+        )
     env_vars = get_dotenv_variables(fname_dotenv)
 
     try:
@@ -31,30 +36,14 @@ def read_dataset_config(
     return config
 
 
-def get_dotenv_variables(fpath: Optional[str] = None) -> dict:
-    if fpath is None:
-        fpath = dotenv.find_dotenv()
-
+def get_dotenv_variables(filename: str = ".env") -> dict:
+    fpath = dotenv.find_dotenv(filename)
     if fpath:
         env_vars = dotenv.dotenv_values(fpath)
         return env_vars
     else:
         raise FileNotFoundError(
             f"Environment file '{fpath}' not found in the current directory or its parents."
-        )
-
-
-def get_dotenv_fname(name: str = ".env", relative: bool = True) -> Optional[str]:
-    import pathlib
-
-    fpath = dotenv.find_dotenv(name)
-    fpath = pathlib.Path(fpath)
-
-    if fpath and fpath.exists():
-        return str(fpath)
-    else:
-        raise FileNotFoundError(
-            f"Environment file '{name}' not found in the current directory or its parents."
         )
 
 

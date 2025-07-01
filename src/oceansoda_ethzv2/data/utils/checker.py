@@ -28,13 +28,13 @@ class TimestepValidator:
         lon_0_360=False,
     ):
         from .date_utils import DateWindows
-        from .processors import make_target_global_grid
+        from .processors import make_target_grid_global
 
         self.spatial_res = spatial_res
         self.time_window = time_window
         self.start_doy = start_doy
         self.dtype = dtype
-        self.target_grid = make_target_global_grid(spatial_res, lon_0_360=lon_0_360)
+        self.target_grid = make_target_grid_global(spatial_res, lon_0_360=lon_0_360)
         self.date_windows = DateWindows(
             start_day_of_year=self.start_doy, window_span=self.time_window
         )
@@ -46,6 +46,37 @@ class TimestepValidator:
             russia=(60, 100),
             south_africa=(-33, 20),
         )
+
+        self.available_checks = (
+            "add_time_bnds",
+            "check_lon_lat",
+            "check_land_points",
+            "fix_timestep",
+            "check_missing_lon",
+        )
+
+    def __call__(
+        self,
+        ds: xr.Dataset,
+        checks: tuple[str, ...] = (
+            "add_time_bnds",
+            "check_lon_lat",
+            "check_land_points",
+            "fix_timestep",
+            "check_missing_lon",
+        ),
+        error_handling: Literal["raise", "warn", "ignore"] = "raise",
+    ) -> xr.Dataset:
+        bad_checks = [check for check in checks if not hasattr(self, check)]
+        assert not bad_checks, (
+            f"Invalid checks: {bad_checks}. Available checks: {self.available_checks}"
+        )
+
+        for check in checks:
+            method = getattr(self, check)
+            ds = method(ds)
+
+        return ds
 
     def add_time_bnds(self, ds: xr.Dataset) -> xr.Dataset:
         """
@@ -305,11 +336,11 @@ class ZarrYearValidator:
         error_handling: Literal["raise", "warn", "ignore"] = "raise",
     ):
         from .date_utils import DateWindows
-        from .processors import make_target_global_grid
+        from .processors import make_target_grid_global
 
         self.spatial_res = spatial_res
         self.time_window = time_window
-        self.target_grid = make_target_global_grid(spatial_res)
+        self.target_grid = make_target_grid_global(spatial_res)
         self.date_windows = DateWindows(window_span=self.time_window)
         self.error_handling = error_handling
 
@@ -359,10 +390,14 @@ class ZarrYearValidator:
         xr.Dataset
             The validated dataset.
         """
+        from functools import partial
+
         checks = [
             self.is_single_year,
             self.is_full_year,
+            self.has_correct_timesteps,
             self.is_correct_shape,
+            self.is_data_present,
         ]
 
         if error_handling is None:
@@ -379,10 +414,10 @@ class ZarrYearValidator:
                     logger.warning(message)
                     results.append(False)
                 case "ignore" if not success:
-                    logger.trace(message)
+                    logger.debug(message)
                     results.append(True)
                 case _ if success:
-                    logger.trace(message)
+                    logger.debug(message)
                     results.append(True)
                 case _:
                     raise ValueError(
@@ -390,6 +425,24 @@ class ZarrYearValidator:
                     )
 
         return all(results)
+
+    def has_correct_timesteps(self, ds: xr.Dataset, tolerance="1h") -> tuple[bool, str]:
+        tolerance = pd.Timedelta(tolerance)
+        year = int(ds.time.dt.year.values[0])
+        expected_time_steps = self.date_windows.get_bin_centers(year)
+        actual_time_steps = ds.time.to_index()
+        diff = abs(expected_time_steps - actual_time_steps)
+        correct_timesteps = (diff < tolerance).all()
+        if not correct_timesteps:
+            return (
+                False,
+                f"Dataset has timesteps that are not within the expected tolerance of {tolerance} to the expected timesteps. ",
+            )
+        else:
+            return (
+                True,
+                f"Dataset has timesteps that are within the expected tolerance of {tolerance} to the expected timesteps.",
+            )
 
     def is_single_year(self, ds: xr.Dataset) -> tuple[bool, str]:
         year_arr = ds.time.dt.year.values
@@ -432,4 +485,32 @@ class ZarrYearValidator:
             return (
                 True,
                 f"Dataset shape matches expected shape: {lon.shape}x{lat.shape}.",
+            )
+
+    def is_data_present(self, ds: xr.Dataset) -> tuple[bool, str]:
+        """
+        Checks if a specific timestep in the dataset is missing data.
+
+        Parameters
+        ----------
+        ds : xr.Dataset
+            The dataset to check.
+        index : int
+            The index of the timestep to check.
+
+        Returns
+        -------
+        tuple[bool, str]
+            A tuple containing a boolean indicating if the timestep is missing data,
+            and a message describing the result.
+        """
+
+        count = ds.count(["lat", "lon"]).compute()
+        missing = count[count == 0].time
+        if (count > 0).all():
+            return (True, f"All timesteps contain data. Total timesteps: {len(count)}.")
+        else:
+            return (
+                False,
+                f"Missing data in timesteps: {missing.values}. Total timesteps with data: {len(count) - len(missing)} out of {len(count)}.",
             )

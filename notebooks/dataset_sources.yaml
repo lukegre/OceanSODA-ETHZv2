@@ -49,8 +49,8 @@ ftp:
 
 soda:
   soda_3_15_2:
-    # source_path: http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc
-    source_path: /Users/luke/Downloads/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc
+    source_path: http://dsrs.atmos.umd.edu/DATA/soda3.15.2/REGRIDED/ocean/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc
+    # source_path: /Users/luke/Downloads/soda3.15.2_5dy_ocean_reg_{time:%Y_%m_%d}.nc
     product: soda
     time_start: '1982-01-01'
     time_end: '2024-12-10'

@@ -26,14 +26,14 @@ class DummyProgress(object):
         pass
 
 
-def check_urls_on_ftp_server(urls: tuple, **kwargs) -> tuple:
+def check_urls_on_ftp_server(urls: tuple, **kwargs) -> tuple[str, ...]:
     flist = list_ftp_files_with_fsspec(urls, **kwargs)
     urls_mask = np.isin([u.split("/")[-1] for u in urls], flist)
     urls_on_ftp_server = tuple(np.array(urls)[urls_mask].tolist())
     return urls_on_ftp_server
 
 
-def list_ftp_files_with_fsspec(urls, **kwargs):
+def list_ftp_files_with_fsspec(urls: list | tuple, **kwargs) -> list[str]:
     import fsspec
 
     fs, url = fsspec.url_to_fs(urls[0], **kwargs)
@@ -63,7 +63,7 @@ def download_w_fsspec(url, dest=None, **kwargs):
     return dest
 
 
-def download_w_pooch(url, dest=None, progress=True, **kwargs):
+def download_w_pooch(url: str, dest: str = ".", progress: bool = True, **kwargs) -> str:
     """Downloads url and reads in the MBL surface file
 
     Args:
@@ -76,14 +76,16 @@ def download_w_pooch(url, dest=None, progress=True, **kwargs):
 
     pooch.utils.get_logger().disabled = not progress
 
-    # download the file
-    filename = pooch.retrieve(
-        url,
-        known_hash=None,
-        path=dest,
-        progressbar=progress,
-        **kwargs,
+    props = (
+        dict(
+            known_hash=None,  # No hash checking by default
+            path=dest,  # Destination path
+            progressbar=progress,  # Show progress bar
+        )
+        | kwargs
     )
+    # download the file
+    filename = pooch.retrieve(url, **props)
     return filename
 
 
@@ -99,7 +101,7 @@ def check_if_url_exists(url: str) -> bool:
 
 
 def check_if_urls_exist(urls: tuple) -> tuple:
-    logger.trace("Checking if URLs exist: {}", urls)
+    logger.debug("Checking if URLs exist: {}", urls)
     return parmap_func(check_if_url_exists, urls)
 
 

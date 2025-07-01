@@ -7,6 +7,7 @@ import pandas as pd
 import xarray as xr
 from loguru import logger
 
+from .http import HTTPEntry
 from .utils.core import CoreDataset
 from .utils.date_utils import DateWindows
 
@@ -29,6 +30,10 @@ class OCCCIDataset(CoreDataset):
         """
         Initialize the OCCCIDataset with properties.
         """
+        assert isinstance(spatial_res, (int, float)), (
+            "spatial_res must be a number, e.g. 0.25 for 0.25 degrees."
+            f" Received type: {type(spatial_res)}, value: {spatial_res}"
+        )
         self.source_path = source_path
         self.spatial_res = spatial_res  # Default spatial resolution in degrees
         self.window_span = window_span  # Default window size for temporal resolution
@@ -39,6 +44,19 @@ class OCCCIDataset(CoreDataset):
         self.save_path = save_path.format(
             window_span=window_span, spatial_res=f"{str(spatial_res).replace('.', '')}"
         )
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    @classmethod
+    def from_dict(cls, kwargs: dict) -> "OCCCIDataset":
+        """
+        Create an instance of OCCCIDataset from a dictionary of parameters.
+        """
+        entry = HTTPEntry(**kwargs)
+        entry_dict = entry.model_dump(exclude_none=True)
+        logger.debug("OCCCI inputs are valid: {}", entry_dict)
+
+        return cls(**entry_dict)
 
     def _get_unprocessed_timestep_remote(
         self,
@@ -51,6 +69,14 @@ class OCCCIDataset(CoreDataset):
         time = self.date_windows.get_window_center(year=year, index=index, time=time)
         dates = self.date_windows.get_window_dates(time=time)
         urls = make_paths_from_dates(dates, string_template=self.source_path)
+
+        if len(urls) == 0:
+            raise FileNotFoundError(
+                f"No valid URLs found for the given dates: {dates}. "
+                "Please check the source path and the date range."
+            )
+        else:
+            logger.debug(f"Found {len(urls)} valid URLs for the dates: {dates}.")
 
         ds_list = download_netcdfs_from_ftp(
             urls=urls, netcdf_opender=self._opener, **self.fsspec_kwargs
@@ -72,6 +98,14 @@ class OCCCIDataset(CoreDataset):
 
         paths = make_paths_from_dates(dates, self.source_path)
         paths = [path for path in paths if pathlib.Path(path).exists()]
+
+        if len(paths) == 0:
+            raise FileNotFoundError(
+                f"No valid paths found for the given dates: {dates}. "
+                "Please check the source path and the date range."
+            )
+        else:
+            logger.debug(f"Found {len(paths)} valid paths for the dates: {dates}.")
 
         ds_list = [self._opener(path) for path in paths]
         ds = xr.concat(ds_list, dim="time")
