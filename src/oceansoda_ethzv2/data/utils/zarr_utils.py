@@ -1,6 +1,6 @@
 import pathlib
 from abc import ABC, abstractmethod
-from functools import cached_property, lru_cache
+from functools import lru_cache
 from typing import Callable, Literal, Optional, Union, final
 
 import numpy as np

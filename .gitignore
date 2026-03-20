@@ -14,5 +14,5 @@ wheels/
 *.nc
 *.zarr
 
-data/
+/data/
 notebooks/dataset_download.log
